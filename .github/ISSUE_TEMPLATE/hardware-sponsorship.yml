@@ -1,0 +1,45 @@
+name: Hardware sponsorship
+description: Offer temporary compute access or a hardware donation for reproducible RTAI research.
+title: "[Hardware sponsorship] "
+labels: ["sponsorship", "hardware"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thank you for supporting open research. Do not include credentials, private network
+        addresses, personal contact details, or shipping information in this public issue.
+  - type: dropdown
+    id: resource
+    attributes:
+      label: Resource class
+      options:
+        - Neuromorphic hardware
+        - AI accelerator
+        - CUDA-capable GPU
+        - Workstation or server
+        - ECC memory or storage
+        - Training-cluster credits
+        - Other research infrastructure
+    validations:
+      required: true
+  - type: textarea
+    id: specifications
+    attributes:
+      label: Public specifications
+      description: Model, capacity, quantity, and any public documentation links.
+    validations:
+      required: true
+  - type: textarea
+    id: availability
+    attributes:
+      label: Availability and constraints
+      description: Time window, usage limits, supported software, and access model.
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Research independence
+      options:
+        - label: The sponsorship does not require favorable results, endorsement, or roadmap control.
+          required: true

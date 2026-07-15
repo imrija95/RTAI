@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RTAI · live memory</title>
+<style>
+  :root {
+    --ink: #0a0e15;          /* base */
+    --panel: #111826;        /* panely */
+    --panel-2: #0e1521;
+    --line: #1f2b3d;         /* hairline */
+    --text: #c4d2e4;         /* neutral with a blue tint */
+    --dim: #6b7c93;
+    --amber: #f5a623;        /* accent: WRITE / positive */
+    --teal: #46c9b8;         /* read / negative */
+    --good: #3fb950;
+    --bad: #f85149;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--ink); color: var(--text); font-family: var(--sans); }
+  body {
+    background:
+      radial-gradient(1200px 600px at 80% -10%, #0f1a2b 0%, transparent 60%),
+      var(--ink);
+    min-height: 100vh; padding: 22px clamp(14px, 3vw, 40px);
+  }
+  a { color: var(--teal); }
+
+  header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+           border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 20px; }
+  h1 { font-size: 20px; font-weight: 650; letter-spacing: -0.01em; margin: 0; }
+  h1 .sub { color: var(--amber); }
+  .tag { font-family: var(--mono); font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+         color: var(--dim); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; }
+  header p { margin: 0; color: var(--dim); font-size: 13px; max-width: 52ch; line-height: 1.5; }
+
+  .grid { display: grid; grid-template-columns: 260px minmax(0,1fr) 300px; gap: 18px; align-items: start; }
+  @media (max-width: 1000px){ .grid { grid-template-columns: 1fr; } }
+
+  .card { background: linear-gradient(180deg, var(--panel), var(--panel-2));
+          border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .card h2 { font-family: var(--mono); font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+             color: var(--dim); margin: 0 0 12px; font-weight: 600; }
+
+  label.field { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+  input[type=number] { width: 100%; background: var(--ink); border: 1px solid var(--line); color: var(--text);
+    font-family: var(--mono); font-size: 15px; padding: 8px 10px; border-radius: 8px; }
+  input:focus, button:focus-visible { outline: 2px solid var(--teal); outline-offset: 1px; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+
+  button { cursor: pointer; font-family: var(--sans); font-weight: 600; font-size: 13px;
+    border-radius: 8px; border: 1px solid var(--line); background: #16202f; color: var(--text);
+    padding: 9px 12px; transition: transform .06s ease, background .15s ease, border-color .15s; }
+  button:hover { border-color: #33475f; }
+  button:active { transform: translateY(1px); }
+  button.primary { background: linear-gradient(180deg, #7a5410, #543908); border-color: #a5730f; color: #ffe9c2; }
+  button.read { background: linear-gradient(180deg, #0f4a44, #0b332f); border-color: #1c7469; color: #cbfff7; }
+  button.ghost { background: transparent; color: var(--dim); }
+  .toggle.on { background: linear-gradient(180deg,#0f4a44,#0b332f); border-color:#1c7469; color:#cbfff7; }
+
+  /* heatmap */
+  .stage { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .selectbar { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; width: 100%; }
+  .chip { font-family: var(--mono); font-size: 11px; padding: 5px 9px; border-radius: 7px; border: 1px solid var(--line);
+    background: var(--ink); color: var(--dim); cursor: pointer; }
+  .chip.active { color: var(--ink); background: var(--teal); border-color: var(--teal); font-weight: 700; }
+  .canvas-wrap { position: relative; }
+  canvas { display: block; image-rendering: pixelated; border-radius: 8px; border: 1px solid var(--line); background: #05080d; }
+  .axis { font-family: var(--mono); font-size: 10px; color: var(--dim); letter-spacing: .08em; }
+  .axis.rows { position: absolute; left: -8px; top: 50%; transform: translate(-100%, -50%) rotate(180deg); writing-mode: vertical-rl; }
+  .cap { font-family: var(--mono); font-size: 11px; color: var(--dim); text-align: center; line-height: 1.6; }
+  .cap b { color: var(--text); font-weight: 600; }
+
+  .legend { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10px; color: var(--dim); }
+  .bar-scale { height: 10px; width: 140px; border-radius: 3px;
+    background: linear-gradient(90deg, var(--teal), #05080d 50%, var(--amber)); border: 1px solid var(--line); }
+
+  /* readouts */
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .metric { background: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 8px; text-align: center; }
+  .metric .k { font-family: var(--mono); font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing:.1em;}
+  .metric .v { font-family: var(--mono); font-size: 15px; color: var(--text); font-variant-numeric: tabular-nums; }
+  .metric.warn .v { color: var(--bad); }
+
+  .answer { font-family: var(--mono); font-size: 14px; margin-bottom: 10px; }
+  .answer .big { font-size: 26px; color: var(--amber); font-weight: 700; }
+  .answer.hit .big { color: var(--good); }
+  .answer.miss .big { color: var(--bad); }
+
+  .memlist { list-style: none; margin: 0; padding: 0; max-height: 150px; overflow-y: auto; }
+  .memlist li { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12px;
+    padding: 4px 6px; border-radius: 6px; }
+  .memlist li:nth-child(odd){ background: rgba(255,255,255,.02); }
+  .memlist .arrow { color: var(--dim); }
+  .hint { font-size: 12px; color: var(--dim); line-height: 1.5; margin-top: 8px; }
+  .status-strip { font-family: var(--mono); font-size: 11px; color: var(--dim); margin-left: auto; }
+  .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background: var(--good); margin-right:5px;
+    box-shadow: 0 0 8px var(--good); }
+
+  /* architecture */
+  .arch-card { margin-top: 18px; }
+  #arch { width: 100%; height: auto; display: block; }
+  .arch-box { fill: #141c29; stroke: #243349; stroke-width: 1.2; }
+  .arch-hi  { fill: rgba(245,166,35,.10); stroke: #a5730f; stroke-width: 1.4; }
+  .arch-t   { fill: var(--text); font-family: var(--mono); font-size: 11px; }
+  .arch-t.sm{ font-size: 9.5px; fill: #9fb0c3; }
+  .arch-cap { fill: var(--dim); font-family: var(--mono); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+  .arch-note{ fill: var(--dim); font-family: var(--mono); font-size: 9.5px; }
+  .arch-flow{ stroke: #3a4a63; stroke-width: 1.4; }
+  .arch-dash{ stroke: #33475f; stroke-width: 1.2; stroke-dasharray: 3 3; }
+  .arch-w.pulse { animation: wpulse .7s ease; }
+  @keyframes wpulse { 0%{filter:drop-shadow(0 0 0 var(--amber));} 45%{filter:drop-shadow(0 0 9px var(--amber));} 100%{filter:none;} }
+  @media (prefers-reduced-motion: reduce){ .arch-w.pulse{ animation: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>RTAI · <span class="sub">live memory</span></h1>
+  <span class="tag">SRWM · self-modifying weights</span>
+  <p>Watch the matrix <b style="color:var(--text)">W</b> rewrite itself. When the model is taught something,
+     it writes the association straight into the weights via a delta rule — warm cells accumulate. Nothing is reset.</p>
+  <span class="status-strip"><span class="dot" id="live-dot"></span><span id="status">connecting…</span></span>
+</header>
+
+<div class="grid">
+  <!-- CONTROLS -->
+  <section class="card" aria-label="controls">
+    <h2>Interaction</h2>
+    <div class="row">
+      <div><label class="field" for="tk">key</label><input type="number" id="tk" min="0" max="31" value="3"></div>
+      <div><label class="field" for="tv">value</label><input type="number" id="tv" min="0" max="31" value="7"></div>
+    </div>
+    <button class="primary" id="btn-teach" style="width:100%; margin-top:10px">Teach  (writes to W)</button>
+
+    <label class="field" for="ak" style="margin-top:18px">query a key</label>
+    <div class="row">
+      <input type="number" id="ak" min="0" max="31" value="3">
+      <button class="read" id="btn-ask" style="flex:0 0 90px">Ask</button>
+    </div>
+    <p class="hint">A query is read-only — it doesn't corrupt memory.</p>
+
+    <div class="row" style="margin-top:16px">
+      <button class="toggle" id="btn-auto">▶ Auto-learn</button>
+      <button class="ghost" id="btn-reset">Reset W</button>
+    </div>
+    <p class="hint">Auto-learn streams random pairs and the matrix fills up live.</p>
+  </section>
+
+  <!-- HEATMAP -->
+  <section class="card stage" aria-label="matrix W">
+    <div class="selectbar" id="layer-chips"></div>
+    <div class="selectbar" id="head-chips"></div>
+    <div class="canvas-wrap">
+      <span class="axis rows">← value (output) →</span>
+      <canvas id="heat" width="416" height="416"></canvas>
+    </div>
+    <div class="axis">← key (query) →</div>
+    <div class="cap" id="heat-cap">W &mdash; layer 0, head 0</div>
+    <div class="legend"><span>−</span><span class="bar-scale"></span><span>+</span>
+      <span id="scale-val" style="margin-left:8px"></span></div>
+  </section>
+
+  <!-- READOUTS -->
+  <section style="display:flex; flex-direction:column; gap:18px">
+    <div class="card" aria-label="answer">
+      <h2>Last query</h2>
+      <div class="answer" id="answer"><span class="dim">— nothing yet —</span></div>
+      <canvas id="dist" width="268" height="70"></canvas>
+      <div class="axis" style="text-align:center; margin-top:4px">probability distribution over values</div>
+    </div>
+
+    <div class="card" aria-label="write activity">
+      <h2>Write activity · ‖ΔW‖</h2>
+      <canvas id="delta" width="268" height="80"></canvas>
+      <div class="axis" style="text-align:center; margin-top:4px">self-modification strength per event (selected layer)</div>
+    </div>
+
+    <div class="card" aria-label="integrity">
+      <h2>W integrity (no guardrails)</h2>
+      <div class="metrics" id="integrity"></div>
+    </div>
+
+    <div class="card" aria-label="memory">
+      <h2>What has been taught</h2>
+      <ul class="memlist" id="memlist"><li><span class="dim">empty</span></li></ul>
+    </div>
+  </section>
+</div>
+
+<section class="card arch-card" aria-label="model architecture">
+  <h2>Architecture — from token to self-modifying weights</h2>
+  <svg id="arch" viewBox="0 0 720 292" role="img" aria-label="RTAI architecture diagram">
+    <defs>
+      <marker id="ah" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L6,3 L0,6 Z" fill="#3a4a63"/>
+      </marker>
+    </defs>
+
+    <!-- ① macro pipeline -->
+    <text x="8" y="18" class="arch-cap">① token flows through the model</text>
+    <rect class="arch-box" x="8"   y="34" width="88"  height="36" rx="7"/><text class="arch-t" x="52"  y="56" text-anchor="middle">tokens</text>
+    <line class="arch-flow" x1="96"  y1="52" x2="116" y2="52" marker-end="url(#ah)"/>
+    <rect class="arch-box" x="118" y="34" width="88"  height="36" rx="7"/><text class="arch-t" x="162" y="56" text-anchor="middle">embedding</text>
+    <line class="arch-flow" x1="206" y1="52" x2="226" y2="52" marker-end="url(#ah)"/>
+    <rect class="arch-box arch-hi" x="228" y="34" width="118" height="36" rx="7"/><text class="arch-t" id="svg-blok" x="287" y="56" text-anchor="middle">block × N</text>
+    <line class="arch-flow" x1="346" y1="52" x2="366" y2="52" marker-end="url(#ah)"/>
+    <rect class="arch-box" x="366" y="34" width="52"  height="36" rx="7"/><text class="arch-t" x="392" y="56" text-anchor="middle">LN</text>
+    <line class="arch-flow" x1="418" y1="52" x2="438" y2="52" marker-end="url(#ah)"/>
+    <rect class="arch-box" x="438" y="34" width="58"  height="36" rx="7"/><text class="arch-t" x="467" y="56" text-anchor="middle">head</text>
+    <line class="arch-flow" x1="496" y1="52" x2="516" y2="52" marker-end="url(#ah)"/>
+    <text class="arch-t" x="522" y="56">logits → values</text>
+
+    <!-- zoom into the block -->
+    <line class="arch-dash" x1="287" y1="70" x2="287" y2="94"/>
+    <text class="arch-note" x="293" y="90">expanded ↓</text>
+
+    <!-- ② inside the block -->
+    <text x="8" y="112" class="arch-cap">② inside the block (repeated N×)</text>
+    <rect class="arch-box" x="8"   y="126" width="50" height="34" rx="7"/><text class="arch-t" x="33"  y="147" text-anchor="middle">LN</text>
+    <line class="arch-flow" x1="58"  y1="143" x2="72" y2="143" marker-end="url(#ah)"/>
+    <rect class="arch-box arch-hi" x="74" y="126" width="78" height="34" rx="7"/><text class="arch-t" x="113" y="147" text-anchor="middle">SRWM</text>
+    <line class="arch-flow" x1="152" y1="143" x2="166" y2="143" marker-end="url(#ah)"/>
+    <rect class="arch-box" x="166" y="126" width="30" height="34" rx="7"/><text class="arch-t" x="181" y="148" text-anchor="middle">+</text>
+    <line class="arch-flow" x1="196" y1="143" x2="210" y2="143" marker-end="url(#ah)"/>
+    <rect class="arch-box" x="210" y="126" width="50" height="34" rx="7"/><text class="arch-t" x="235" y="147" text-anchor="middle">LN</text>
+    <line class="arch-flow" x1="260" y1="143" x2="274" y2="143" marker-end="url(#ah)"/>
+    <rect class="arch-box" x="274" y="126" width="62" height="34" rx="7"/><text class="arch-t" x="305" y="147" text-anchor="middle">MLP</text>
+    <line class="arch-flow" x1="336" y1="143" x2="350" y2="143" marker-end="url(#ah)"/>
+    <rect class="arch-box" x="350" y="126" width="30" height="34" rx="7"/><text class="arch-t" x="365" y="148" text-anchor="middle">+</text>
+    <text class="arch-note" x="392" y="147">(+) = residual</text>
+
+    <!-- zoom into SRWM -->
+    <line class="arch-dash" x1="113" y1="160" x2="113" y2="186"/>
+    <text class="arch-note" x="119" y="182">expanded ↓</text>
+
+    <!-- ③ inside SRWM -->
+    <text x="8" y="204" class="arch-cap">③ inside SRWM — the only place where weights change at runtime</text>
+    <rect class="arch-box" x="8"   y="216" width="46"  height="40" rx="7"/><text class="arch-t" x="31"  y="240" text-anchor="middle">xₜ</text>
+    <line class="arch-flow" x1="54"  y1="236" x2="66" y2="236" marker-end="url(#ah)"/>
+    <rect class="arch-box" x="66"  y="216" width="86"  height="40" rx="7"/><text class="arch-t sm" x="109" y="240" text-anchor="middle">conv. k=4</text>
+    <line class="arch-flow" x1="152" y1="236" x2="164" y2="236" marker-end="url(#ah)"/>
+    <rect class="arch-box" x="164" y="216" width="92"  height="40" rx="7"/><text class="arch-t sm" x="210" y="240" text-anchor="middle">q · k · v · β</text>
+    <line class="arch-flow" x1="256" y1="236" x2="268" y2="236" marker-end="url(#ah)"/>
+    <rect class="arch-box arch-hi arch-w" id="svg-w" x="268" y="210" width="214" height="52" rx="8"/>
+    <text class="arch-t" x="375" y="230" text-anchor="middle">W — persistent memory</text>
+    <text class="arch-t sm" x="375" y="248" text-anchor="middle">W ← W + β·(v − W·k)·kᵀ</text>
+    <line class="arch-flow" x1="482" y1="236" x2="494" y2="236" marker-end="url(#ah)"/>
+    <rect class="arch-box" x="494" y="216" width="46"  height="40" rx="7"/><text class="arch-t" x="517" y="240" text-anchor="middle">oₜ</text>
+    <text class="arch-note" x="548" y="233">o = W·q</text>
+    <text class="arch-note" x="548" y="248">↖ the heatmap shows this W</text>
+  </svg>
+</section>
+
+<script>
+const $ = s => document.querySelector(s);
+const api = (p, body) => fetch(p, body ? {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(body)} : undefined).then(r => r.json());
+
+let CFG = null, W = null, sel = {layer:0, head:0}, deltaHist = [], mem = {}, reduceMotion = false;
+reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+const INK=[5,8,13], AMBER=[245,166,35], TEAL=[70,201,184];
+function lerp(a,b,t){ return [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]; }
+function colorFor(v, s){
+  const t = Math.max(-1, Math.min(1, v/(s||1e-6)));
+  const c = t>=0 ? lerp(INK,AMBER,t) : lerp(INK,TEAL,-t);
+  return `rgb(${c[0]|0},${c[1]|0},${c[2]|0})`;
+}
+
+function drawHeat(mat){
+  const cv = $("#heat"), ctx = cv.getContext("2d");
+  const n = mat.length, cell = cv.width / n;
+  let s = 0; for(const row of mat) for(const v of row) s = Math.max(s, Math.abs(v));
+  $("#scale-val").textContent = "±" + (s ? s.toFixed(2) : "0");
+  ctx.clearRect(0,0,cv.width,cv.height);
+  for(let i=0;i<n;i++) for(let j=0;j<n;j++){
+    ctx.fillStyle = colorFor(mat[i][j], s);
+    ctx.fillRect(j*cell, i*cell, Math.ceil(cell), Math.ceil(cell));
+  }
+}
+
+function drawDelta(){
+  const cv = $("#delta"), ctx = cv.getContext("2d"); const w=cv.width,h=cv.height;
+  ctx.clearRect(0,0,w,h);
+  ctx.strokeStyle="#1f2b3d"; ctx.beginPath(); ctx.moveTo(0,h-1); ctx.lineTo(w,h-1); ctx.stroke();
+  const vals = deltaHist.map(d => d[sel.layer] ?? 0);
+  const max = Math.max(0.01, ...vals);
+  const n = Math.max(vals.length, 1), bw = Math.max(2, Math.min(16, w/n) - 2);
+  vals.slice(-Math.floor(w/(bw+2))).forEach((v,i)=>{
+    const bh = (v/max)*(h-6), x = i*(bw+2), last = i===vals.length-1;
+    ctx.fillStyle = last ? "#f5a623" : "rgba(245,166,35,.4)";
+    ctx.fillRect(x, h-bh-1, bw, bh);
+  });
+}
+
+function drawDist(dist, pred, truth){
+  const cv = $("#dist"), ctx = cv.getContext("2d"); const w=cv.width,h=cv.height;
+  ctx.clearRect(0,0,w,h);
+  const n = dist.length, bw = w/n, max = Math.max(...dist, .05);
+  for(let i=0;i<n;i++){
+    const bh = (dist[i]/max)*(h-4);
+    ctx.fillStyle = i===pred ? "#f5a623" : "#26364c";
+    ctx.fillRect(i*bw, h-bh, bw-0.5, bh);
+    if(i===truth){ ctx.strokeStyle="#3fb950"; ctx.lineWidth=1.5; ctx.strokeRect(i*bw, 1, bw-0.5, h-2); }
+  }
+}
+
+function renderIntegrity(list){
+  $("#integrity").innerHTML = list.map(m =>
+    `<div class="metric ${m.finite?'':'warn'}"><div class="k">L${m.layer}</div>
+     <div class="v" title="Frobenius">${m.fro.toFixed(1)}</div></div>`).join("");
+}
+
+function renderMem(){
+  const keys = Object.keys(mem).sort((a,b)=>mem[b].t-mem[a].t);
+  $("#memlist").innerHTML = keys.length ? keys.map(k =>
+    `<li><span>key <b>${k}</b></span><span class="arrow">→</span><span style="color:var(--amber)">${mem[k].v}</span></li>`).join("")
+    : '<li><span class="dim">empty</span></li>';
+}
+
+function chips(el, count, which){
+  el.innerHTML = "";
+  for(let i=0;i<count;i++){
+    const c = document.createElement("div");
+    c.className = "chip" + (sel[which]===i?" active":"");
+    c.textContent = (which==="layer"?"layer ":"head ")+i;
+    c.onclick = ()=>{ sel[which]=i; syncChips(); redraw(); };
+    el.appendChild(c);
+  }
+}
+function syncChips(){
+  [...$("#layer-chips").children].forEach((c,i)=>c.classList.toggle("active",sel.layer===i));
+  [...$("#head-chips").children].forEach((c,i)=>c.classList.toggle("active",sel.head===i));
+  $("#heat-cap").innerHTML = `W &mdash; layer ${sel.layer}, head ${sel.head}`;
+}
+function redraw(){ if(W) drawHeat(W[sel.layer][sel.head]); drawDelta(); }
+
+async function init(){
+  const st = await api("/api/state");
+  CFG = st.config; W = st.W;
+  chips($("#layer-chips"), CFG.n_layer, "layer");
+  chips($("#head-chips"), CFG.n_head, "head");
+  const bl = document.getElementById("svg-blok"); if(bl) bl.textContent = `block × ${CFG.n_layer}`;
+  ["tk","tv","ak"].forEach(id=>{ $("#"+id).max = id==="tv"?CFG.n_vals-1:CFG.n_keys-1; });
+  syncChips(); renderIntegrity(st.integrity); redraw();
+  $("#status").textContent = `model live · ${CFG.n_layer}×${CFG.n_head} matrices ${CFG.hd}×${CFG.hd}`;
+}
+
+async function teach(k, v){
+  const r = await api("/api/teach", {key:k, value:v});
+  mem[k] = {v, t: Date.now()};
+  deltaHist.push(r.deltas[r.deltas.length-1]);
+  renderIntegrity(r.integrity); renderMem();
+  const wbox = document.getElementById("svg-w");        // pulse the W matrix in the diagram
+  if(wbox && !reduceMotion){ wbox.classList.remove("pulse");
+    requestAnimationFrame(()=>wbox.classList.add("pulse")); setTimeout(()=>wbox.classList.remove("pulse"),720); }
+  // animation: show the intermediate step (after key), then the final one (after value)
+  if(!reduceMotion && r.traj.length===2){
+    drawHeat(r.traj[0][sel.layer][sel.head]);       // W after processing the key
+    setTimeout(()=>{ W = r.traj[1]; redraw(); }, 130); // W after writing the value
+  } else { W = r.traj[r.traj.length-1]; redraw(); }
+}
+
+async function ask(k){
+  const r = await api("/api/ask", {key:k});
+  const truth = mem[k] ? mem[k].v : -1;
+  const box = $("#answer");
+  const known = truth>=0;
+  box.className = "answer" + (known ? (r.pred===truth?" hit":" miss") : "");
+  box.innerHTML = `key ${k} → <span class="big">${r.pred}</span>` +
+    (known ? ` <span style="color:var(--dim)">(learned: ${truth}, confidence ${(r.conf*100).toFixed(0)}%)</span>`
+           : ` <span style="color:var(--dim)">(confidence ${(r.conf*100).toFixed(0)}%)</span>`);
+  drawDist(r.dist, r.pred, truth);
+}
+
+$("#btn-teach").onclick = ()=> teach(+$("#tk").value, +$("#tv").value);
+$("#btn-ask").onclick   = ()=> ask(+$("#ak").value);
+$("#btn-reset").onclick = async ()=>{ const r=await api("/api/reset",{}); mem={}; deltaHist=[];
+  W = (await api("/api/state")).W; renderIntegrity(r.integrity); renderMem(); redraw();
+  $("#answer").innerHTML='<span class="dim">— reset —</span>'; drawDist(Array(CFG.n_vals).fill(0),-1,-1); };
+
+let auto = null;
+$("#btn-auto").onclick = (e)=>{
+  if(auto){ clearInterval(auto); auto=null; e.target.classList.remove("on"); e.target.textContent="▶ Auto-learn"; }
+  else { e.target.classList.add("on"); e.target.textContent="⏸ Auto-learn";
+    auto = setInterval(()=>{ const k=Math.floor(Math.random()*CFG.n_keys), v=Math.floor(Math.random()*CFG.n_vals);
+      $("#tk").value=k; $("#tv").value=v; teach(k,v); }, reduceMotion?900:650); }
+};
+
+init().catch(e=>{ $("#status").textContent="connection error"; $("#live-dot").style.background="var(--bad)"; });
+</script>
+</body>
+</html>

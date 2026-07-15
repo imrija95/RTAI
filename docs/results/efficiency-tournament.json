@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-15",
+  "seed": 1337,
+  "budget_minutes": 240.0,
+  "device_class": "single CUDA GPU",
+  "complete": true,
+  "promoted_arms": [],
+  "verdicts": {
+    "compiler": {"pass": false, "absolute_tool_gain": 0.0},
+    "event": {"pass": false, "speedup_vs_baseline": 0.7583895888270856},
+    "genome": {"pass": false, "depth_metrics_improved": 1},
+    "local_credit": {"pass": false, "speedup_vs_baseline": 1.5906904964871151},
+    "moe_top1": {"pass": false, "speedup_vs_soft4": 1.1007316960155564}
+  }
+}

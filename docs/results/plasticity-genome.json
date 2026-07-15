@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "date": "2026-07-15",
+  "mechanism_pass": false,
+  "recall_gate": false,
+  "sequence_gate": false,
+  "scale_gate": true,
+  "assistant_gate": "not_run",
+  "three_seed_audit": {
+    "one_fact_recall": 0.013888888888888888,
+    "three_fact_recall": 0.013888888888888888,
+    "restart_accuracy": 0.125
+  },
+  "thousand_x_claim": false
+}

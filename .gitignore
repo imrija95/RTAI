@@ -1,0 +1,47 @@
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Local secrets and machine-specific configuration
+.env*
+!.env.example
+.claude/
+.agents/
+.codex/
+.playwright-cli/
+.idea/
+.vscode/
+.DS_Store
+
+# Local output
+output/
+dist/
+*.log
+*.tele.json
+viz_data.json
+
+# Model checkpoints, optimizer resumes, and persistent runtime memory
+*.pt
+*.pth
+*.safetensors
+*.resume
+snapshots/
+persist.pt
+chat_state.pt
+fractal_*state*.pt
+
+# Downloaded or generated datasets and tokenizers
+data/
+fractal_data*/
+*.bin
+tokenizer.json
+fractal_tokenizer*.json
+
+# Experiment search state and raw results
+fractal_efficiency_results*.json
+plastic_genome_results*.json
+plastic_genome_results*.jsonl

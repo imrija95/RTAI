@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If this software supports published work, cite the repository and the relevant experiment note."
+title: "RTAI: Persistent self-modifying language-model research"
+type: software
+authors:
+  - name: "RTAI contributors"
+version: 0.0.1
+date-released: 2026-07-15
+license: Apache-2.0
+abstract: >-
+  From-scratch PyTorch experiments in naturally fractal language models and persistent
+  fast-weight memory that changes during operation.
