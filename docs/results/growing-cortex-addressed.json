@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "status": "mechanism_validated_interpreter_gate_near_miss",
+  "date": "2026-07-16",
+  "model": {
+    "parameters": 2997528,
+    "active_parameters": 572184,
+    "n_embd": 256,
+    "depth": 6,
+    "n_scales": 2,
+    "skill_rank": 16
+  },
+  "curriculum": {
+    "interpreter_steps": 8000,
+    "initial_compiler_steps": 8000,
+    "address_repair_steps": 2000,
+    "meta_tasks": 8,
+    "queries_per_task": 16,
+    "opaque_names_repermuted_each_episode": true,
+    "held_out_skills": 16,
+    "inputs_per_skill": 64,
+    "router_threshold": 0.55,
+    "stable_address_separate_from_execution_payload": true
+  },
+  "results": {
+    "interpreter_accuracy": 0.76171875,
+    "no_skill_accuracy": 0.0234375,
+    "compiled_accuracy": 0.76171875,
+    "sequential_final_accuracy": 0.76171875,
+    "oldest_skill_accuracy": 0.5625,
+    "known_address_accuracy": 1.0,
+    "known_address_rejection_rate": 0.0,
+    "known_address_wrong_rate": 0.0,
+    "control_hijack_rate": 0.0,
+    "global_overwrite_final_accuracy": 0.0859375,
+    "birth_max_logit_difference": 0.0,
+    "restart_accuracy": 0.76171875,
+    "restart_oldest_accuracy": 0.5625
+  },
+  "promotion": {
+    "birth_is_function_preserving": true,
+    "interpreter_accuracy_80pct": false,
+    "compiled_skill_accuracy_60pct": true,
+    "sequential_accuracy_70pct": true,
+    "oldest_skill_50pct": true,
+    "control_hijack_below_10pct": true,
+    "beats_global_overwrite_20pp": true,
+    "restart_complete": true,
+    "restart_accuracy_70pct": true
+  },
+  "conclusion": "All growth, routing, retention, overwrite-control, and restart gates passed. The independent interpreter target narrowly missed at 76.17% versus 80%. Stable skill identity must be separated from the variable execution payload; mixing them caused the earlier apparent memory failure."
+}

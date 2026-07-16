@@ -23,6 +23,7 @@ import json
 import math
 import random
 
+import numpy as np
 import torch
 
 from fractal.model import Config, FractalLM
@@ -32,6 +33,9 @@ from fractal import persist
 def get_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--iters", type=int, default=4000)
+    ap.add_argument("--seed", type=int, default=20260716)
+    ap.add_argument("--val_seed", type=int, default=20260717,
+                    help="fixed validation sampler seed reused at every evaluation")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--block_size", type=int, default=128)
     ap.add_argument("--recall_block", type=int, default=0,
@@ -81,6 +85,24 @@ def get_args():
     ap.add_argument("--moe_lambda", type=float, default=0.0, help="MoE router load-balance strength (usage neg-entropy)")
     ap.add_argument("--event_budget", type=float, default=1.0,
                     help="fraction of causally novel positions sent through the memory unit")
+    ap.add_argument("--event_algebra", action="store_true",
+                    help="carry O(1) eligibility traces for delayed predictive/user feedback")
+    ap.add_argument("--eligibility_decay", type=float, default=0.95,
+                    help="per-token retention of Event Algebra eligibility traces")
+    ap.add_argument("--feedback_queue", default="",
+                    help="optional JSONL queue of live user ratings to consolidate exactly once")
+    ap.add_argument("--feedback_state", default="",
+                    help="durable W0 + consumed-event state (default: OUT.feedback-state.pt)")
+    ap.add_argument("--feedback_max_per_step", type=int, default=4,
+                    help="maximum new live ratings consolidated at one safe batch boundary")
+    ap.add_argument("--growing_cortex", action="store_true",
+                    help="enable append-only, content-addressed low-rank skill hemispheres")
+    ap.add_argument("--skill_rank", type=int, default=4,
+                    help="rank of one active Growing Cortex skill residual")
+    ap.add_argument("--skill_router_threshold", type=float, default=0.25,
+                    help="minimum task-key similarity required to activate a stored skill")
+    ap.add_argument("--skill_no_auto_route", action="store_true",
+                    help="disable automatic skill routing; explicit sticky routing still works")
     ap.add_argument("--grad_ckpt", action="store_true", help="gradient checkpointing (saves VRAM)")
     ap.add_argument("--compile", action="store_true", help="torch.compile the forward (~2x; model stays raw for save/telemetry)")
     ap.add_argument("--accum", type=int, default=1, help="gradient accumulation (effective batch = batch×accum)")
@@ -160,7 +182,11 @@ def _viz_telemetry(model, prev_g):
     # already exist after .backward(); no extra forward/backward)
     def _n(p):
         return float(p.grad.norm()) if (p is not None and p.grad is not None) else 0.0
-    parts = {"qk": [], "beta": [], "proj": [], "mlp": []}
+    def _module_n(module):
+        if module is None:
+            return 0.0
+        return sum(_n(parameter) ** 2 for parameter in module.parameters()) ** 0.5
+    parts = {"qk": [], "beta": [], "proj": [], "mlp": [], "skill": []}
     for d in range(D):
         u = model.block_at(d).unit
         mlp = model.block_at(d).mlp
@@ -171,6 +197,11 @@ def _viz_telemetry(model, prev_g):
             parts["mlp"].append(round(_n(mlp.router.weight), 5))
         else:
             parts["mlp"].append(round((_n(mlp.fc.weight) ** 2 + _n(mlp.proj.weight) ** 2) ** 0.5, 5))
+        skill = model.skill_cortex
+        parts["skill"].append(round(
+            0.0 if skill is None else (
+                _module_n(skill.compiler) ** 2 + _module_n(skill.query_proj) ** 2
+            ) ** 0.5, 5))
     return {"grad": grad, "wn": wn, "res": res, "depth": D, "n_scales": L,
             "gammas": gammas, "taus": taus, "parts": parts,
             "n_head": model.cfg.n_head, "mlp_ratio": getattr(model.cfg, "mlp_ratio", 2)}, gvec
@@ -202,12 +233,13 @@ def _tbtt_step(model, x, y, block_size, segments, device, gate_lambda=0.0, bf16=
 
 
 @torch.no_grad()
-def _val_ppl(model, device, nb=8, data_dir="fractal_data"):
+def _val_ppl(model, device, nb=8, data_dir="fractal_data", seed=20260717):
     from fractal.data import get_batch as gb
     model.eval()
     tot = 0.0
+    rng = np.random.RandomState(seed)
     for _ in range(nb):
-        x, y = gb("val", 8, 128, device, data_dir=data_dir)
+        x, y = gb("val", 8, 128, device, data_dir=data_dir, rng=rng)
         _, loss, _, _ = model(x, targets=y, states=None)
         tot += loss.item()
     model.train()
@@ -216,6 +248,11 @@ def _val_ppl(model, device, nb=8, data_dir="fractal_data"):
 
 def main():
     args = get_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     if dev != "cuda":
         args.bf16 = args.tf32 = False
@@ -234,12 +271,32 @@ def main():
                  depth=args.depth, n_scales=args.n_scales, tau0=args.tau0, rho=args.rho,
                  chunk_size=args.chunk_size, high_pass_keys=args.high_pass,
                  selective=args.selective, untie=args.untie, n_experts=args.n_experts,
-                 moe_mode=args.moe_mode, event_budget=args.event_budget)
+                 moe_mode=args.moe_mode, event_budget=args.event_budget,
+                 event_algebra=(args.event_algebra or bool(args.feedback_queue)),
+                 eligibility_decay=args.eligibility_decay,
+                 growing_cortex=args.growing_cortex,
+                 skill_rank=args.skill_rank,
+                 skill_router_threshold=args.skill_router_threshold,
+                 skill_auto_route=not args.skill_no_auto_route)
     if args.resume and os.path.exists(args.out):
         model = persist.load_model(args.out, dev)      # restore the model (and its cfg)
         cfg = model.cfg
     else:
         model = FractalLM(cfg).to(dev)
+    feedback_seen = set()
+    feedback_mod = feedback_tok = None
+    feedback_state_path = args.feedback_state or (args.out + ".feedback-state.pt")
+    if args.feedback_queue:
+        from fractal import chat_format as feedback_format
+        from fractal import feedback as feedback_mod
+        from fractal import tokenizer as feedback_tokenizer
+        feedback_mod.enable(model)
+        feedback_tok = feedback_tokenizer.load(args.tokenizer)
+        if feedback_tok.get_vocab_size() != model.cfg.vocab_size:
+            raise ValueError("feedback tokenizer/model vocabulary mismatch")
+        feedback_seen = feedback_mod.load_consolidation_state(feedback_state_path, model)
+        print(f"[feedback] live queue: {args.feedback_queue} | consumed {len(feedback_seen)} events",
+              flush=True)
     model.grad_ckpt = args.grad_ckpt
     if args.gate_lambda > 0.0:
         model.block.unit._log_gate = True
@@ -316,6 +373,27 @@ def main():
         if plast is not None:
             blob["plast"] = plast.state_dict()       # usage EMA (resume-safe)
         persist.atomic_torch_save(blob, args.out + ".resume")
+
+    def consume_feedback():
+        if feedback_mod is None:
+            return 0
+        pending = [event for event in feedback_mod.read_events(args.feedback_queue)
+                   if event["event_id"] not in feedback_seen]
+        applied = 0
+        for event in pending[:max(args.feedback_max_per_step, 0)]:
+            role = event.get("role")
+            marker = feedback_format.USER if role == "user" else feedback_format.ASSISTANT
+            content = str(event.get("content", "")).strip()
+            credit = float(event.get("credit_delta", 0.0))
+            if content and credit:
+                ids = feedback_tok.encode(f"{marker}\n{content}").ids
+                evidence = feedback_mod.message_eligibility(model, ids, dev)
+                feedback_mod.consolidate_w0(model, evidence, credit)
+            feedback_seen.add(event["event_id"])
+            applied += 1
+        if applied:
+            feedback_mod.save_consolidation_state(feedback_state_path, model, feedback_seen)
+        return applied
 
     # --- training telemetry for the dashboard (VIBE #1/#2: truthful but cheap – only every N steps) ---
     viz_params = round(sum(p.numel() for p in model.parameters()) / 1e6, 2)
@@ -404,6 +482,10 @@ def main():
             plast.update(model)                  # refresh usage EMA from this step's gate reads
         viz_gn_t = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # tensor; float() only in the dump
         opt.step()
+        feedback_applied = consume_feedback()
+        if feedback_applied:
+            print(f"  [feedback @ iter {it}] consolidated {feedback_applied} event(s) into W0",
+                  flush=True)
 
         if args.viz_telemetry and it % args.viz_every == 0:      # cheap dump (VIBE #2) — grads still valid
             part, viz_prev_g = _viz_telemetry(model, viz_prev_g)
@@ -415,6 +497,9 @@ def main():
                          "moe_mode": getattr(model.cfg, "moe_mode", "soft"),
                          "event_budget": getattr(model.cfg, "event_budget", 1.0),
                          "event_share": round(model.event_share(), 4),
+                         "growing_cortex": (
+                             None if model.skill_cortex is None
+                             else model.skill_cortex.snapshot()),
                          "active_params": round(model.parameter_counts()[1] / 1e6, 2),
                          "ckpt": os.path.basename(args.out),
                          "text": (viz_tok.decode(cur_ids[:32].tolist()) if (viz_tok is not None and cur_ids is not None) else "")})
@@ -442,7 +527,8 @@ def main():
             save_ckpt(it)
             print(f"  [checkpoint @ iter {it} → {args.out}]", flush=True)
         if it % max(args.iters // 20, 1) == 0 or it == args.iters - 1:
-            extra = "" if args.smoke else f"  val_ppl {_val_ppl(fwd, dev, data_dir=args.data_dir):.1f}"
+            extra = "" if args.smoke else (
+                f"  val_ppl {_val_ppl(fwd, dev, data_dir=args.data_dir, seed=args.val_seed):.1f}")
             print(f"iter {it:4d}  loss {loss:.4f}  lr {lr:.2e}{extra}", flush=True)
 
     save_ckpt(args.iters - 1)
@@ -455,7 +541,8 @@ def main():
 
     # final report
     if not args.smoke:
-        print(f"final val_ppl = {_val_ppl(model, dev, 16, data_dir=args.data_dir):.1f}")
+        print(f"final val_ppl = "
+              f"{_val_ppl(model, dev, 16, data_dir=args.data_dir, seed=args.val_seed):.1f}")
     if rg is not None and args.task == "agent":
         from fractal.grammar import guided_call
         for split, ho in [("SEEN", False), ("HELD-OUT", True)]:

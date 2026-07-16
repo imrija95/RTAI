@@ -1,9 +1,8 @@
 """The one chat/tool protocol — used everywhere (data rendering, agent loop, chat).
 
-ONE template, defined as literal strings tokenised by the existing byte-BPE (no new tokenizer,
-so later phases continue from the current checkpoint). Every data source is serialised into this
-format by `render()`, the agent loop generates in it, and the harness streams tool results back in
-it. This is the single source of truth for the markers — do not spell them out anywhere else.
+ONE template used by data rendering, the agent loop, and tool-result ingestion. Legacy checkpoints
+encode the literal strings with their existing byte BPE; Natural Cortex trains a fresh tokenizer
+where every marker is one atomic special token.
 
     <|system|>\n{system}
     <|user|>\n{user text}
@@ -29,11 +28,14 @@ USER = "<|user|>"
 ASSISTANT = "<|assistant|>"
 TOOL_CALL = "<|tool_call|>"
 TOOL_RESULT = "<|tool_result|>"
+SKILL = "<|skill|>"
+TEACH = "<|teach|>"
 END = "<|end|>"
 
-ROLES = ("system", "user", "assistant", "tool_call", "tool_result")
+ROLES = ("system", "user", "assistant", "tool_call", "tool_result", "skill", "teach")
 _MARKER = {"system": SYSTEM, "user": USER, "assistant": ASSISTANT,
-           "tool_call": TOOL_CALL, "tool_result": TOOL_RESULT}
+           "tool_call": TOOL_CALL, "tool_result": TOOL_RESULT,
+           "skill": SKILL, "teach": TEACH}
 
 # roles whose content is a tokens-of-interest span for a chat template consumer; kept for reuse.
 ASSISTANT_ROLES = ("assistant", "tool_call")
@@ -83,7 +85,7 @@ def render_pieces(segments):
             pieces.append((content, True))          # the assistant's answer is learned
         elif role == "tool_call":
             pieces.append((head + content, True))   # the model emits the whole tool call
-        else:                                       # system / user / tool_result → context (masked)
+        else:                                       # system / user / tool_result / teaching metadata
             pieces.append((head + content, False))
     pieces.append(("\n" + END, True))               # the model learns to stop
     return pieces

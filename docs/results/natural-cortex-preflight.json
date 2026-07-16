@@ -1,0 +1,56 @@
+{
+  "benchmark_scope": "production",
+  "dashboard_overhead_gate": {
+    "below_2pct": true,
+    "measured_fraction_every_25": 0.00040695625133327953
+  },
+  "device": "cuda",
+  "full_hypernetwork_compiler_enabled": false,
+  "gradient_checkpointing": {
+    "rule": "disable only when it is at least 15% faster and remains below 10.5 GB",
+    "selection": "disabled",
+    "with": {
+      "gradient_checkpointing": true,
+      "peak_vram_gb": 2.301087232,
+      "sampled_telemetry_seconds": 0.01049110060557723,
+      "seconds_per_step": 1.0311772404238582,
+      "telemetry_overhead_every_25": 0.00040695625133327953,
+      "tokens_per_second": 3972.159042529263
+    },
+    "without": {
+      "gradient_checkpointing": false,
+      "peak_vram_gb": 8.966262272,
+      "sampled_telemetry_seconds": 0.010540288791526109,
+      "seconds_per_step": 0.8062128706020303,
+      "telemetry_overhead_every_25": 0.0005229531393442166,
+      "tokens_per_second": 5080.544046563482
+    }
+  },
+  "hardware": {
+    "name": "NVIDIA GeForce RTX 3060",
+    "total_vram_gb": 12.490440704
+  },
+  "long_run_authorized": false,
+  "production_flags": {
+    "event_algebra": false,
+    "event_patches": false,
+    "global_online_w0": false,
+    "scalar_feedback_consolidation": false,
+    "selective_recurrence": false,
+    "timescale_neurogenesis": false
+  },
+  "production_parameters": {
+    "active": 65888340,
+    "stored": 66010708
+  },
+  "projected_240m_gpu_hours": 13.121954274121586,
+  "schema_version": 1,
+  "skill_birth": {
+    "function_preserving_birth": true,
+    "initial_down_is_nonzero": true,
+    "initial_up_is_zero": true,
+    "nonzero_update": true,
+    "steps": 16,
+    "zero_output_has_nonzero_gradient": true
+  }
+}

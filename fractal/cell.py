@@ -28,13 +28,17 @@ import torch
 import torch.nn as nn
 
 
-def delta_recurrent(q, k, v, beta, W, gamma: float = 1.0, return_delta: bool = False, f=None):
+def delta_recurrent(q, k, v, beta, W, gamma: float = 1.0, return_delta: bool = False, f=None,
+                    eligibility=None, eligibility_decay: float | None = None):
     """Step by step, W = decay·W + β(v − Wk)kᵀ, read after write.
     decay = scalar γ, OR (selective mode) a per-step forget gate f (B,H,T) — learned dynamics.
     Returns (out (B,H,T,hd), W_final, dnorms|None)."""
     T = q.shape[2]
     outs = []
     dnorms = [] if return_delta else None
+    track_eligibility = eligibility_decay is not None
+    if track_eligibility and eligibility is None:
+        eligibility = torch.zeros_like(W)
     for t in range(T):
         k_t, v_t, q_t = k[:, :, t], v[:, :, t], q[:, :, t]        # (B,H,hd)
         b_t = beta[:, :, t].unsqueeze(-1)                          # (B,H,1)
@@ -42,11 +46,14 @@ def delta_recurrent(q, k, v, beta, W, gamma: float = 1.0, return_delta: bool = F
         dW = torch.einsum("bhi,bhj->bhij", b_t * (v_t - v_hat), k_t)
         decay = f[:, :, t, None, None] if f is not None else gamma  # (B,H,1,1) or scalar
         W = decay * W + dW                                         # SELF-MODIFICATION
+        if track_eligibility:
+            eligibility = eligibility_decay * eligibility + dW
         outs.append(torch.einsum("bhij,bhj->bhi", W, q_t))        # read after write
         if return_delta:
             dnorms.append(dW.flatten(1).norm(dim=1))              # (B,)
     dn = torch.stack(dnorms, dim=1) if return_delta else None      # (B,T)
-    return torch.stack(outs, dim=2), W, dn                         # (B,H,T,hd)
+    result = (torch.stack(outs, dim=2), W, dn)                     # (B,H,T,hd)
+    return (*result, eligibility) if track_eligibility else result
 
 
 def delta_chunk(q, k, v, beta, W, chunk_size: int, gamma: float = 1.0):
@@ -168,3 +175,12 @@ class FastWeightCell(nn.Module):
             out, W = delta_chunk_decay(q, k, v, beta, W, self.chunk_size, self.gamma)
             return out, W, None
         return delta_recurrent(q, k, v, beta, W, self.gamma, return_delta, f=f)
+
+    def scan_eligibility(self, q, k, v, beta, W, eligibility, eligibility_decay: float,
+                         return_delta: bool = False, f=None):
+        """Recurrent event-algebra path with a chunking-invariant delayed-credit trace."""
+        bg = self._beta_gain_f
+        if bg != 1.0:
+            beta = 1.0 - (1.0 - beta).clamp(min=1e-6).pow(bg)
+        return delta_recurrent(q, k, v, beta, W, self.gamma, return_delta, f=f,
+                               eligibility=eligibility, eligibility_decay=eligibility_decay)

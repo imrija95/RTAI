@@ -45,3 +45,15 @@ fractal_tokenizer*.json
 fractal_efficiency_results*.json
 plastic_genome_results*.json
 plastic_genome_results*.jsonl
+event_algebra_results*.json
+/results/
+
+# Natural Cortex generated artifacts and private runtime state
+natural_tokenizer*.json
+natural_data*/
+natural_ab*/
+natural_*_run/
+natural_runtime*/
+natural_eval_report.json
+fractal_feedback.jsonl
+fractal_ui_session.json

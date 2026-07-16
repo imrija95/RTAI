@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "status": "preliminary",
+  "checkpoint": "fractal_ckpt_eff_baseline.pt",
+  "model_parameters": 6420000,
+  "task": {
+    "type": "held-out associative recall",
+    "n_facts": 1,
+    "distance": 0
+  },
+  "scalar_credit_screen": {
+    "trials": 32,
+    "baseline_accuracy": 0.25,
+    "default_accuracy": 0.25,
+    "gentle_accuracy": 0.25,
+    "medium_accuracy": 0.25,
+    "strong_accuracy": 0.21875,
+    "w0_accuracy_all_settings": 0.0
+  },
+  "vector_teaching_unconstrained": {
+    "trials": 16,
+    "teacher_lr": 0.3,
+    "teacher_steps": 16,
+    "teacher_max_fraction": 0.5,
+    "fresh_session_accuracy": 1.0,
+    "mean_answer_probability": 0.48322669160370424,
+    "mean_answer_rank": 1.0,
+    "warning": "This screen had no held-out specificity controls."
+  },
+  "vector_teaching_specificity": {
+    "trials": 32,
+    "controls_per_trial": 3,
+    "fresh_session_accuracy": 0.65625,
+    "mean_answer_probability": 0.27293964835325824,
+    "mean_answer_rank": 33.59375,
+    "taught_token_control_probability": 0.25091647894987545,
+    "taught_token_control_rate": 0.6041666666666667,
+    "conclusion": "Most unconstrained top-1 success was a global taught-token bias, not a specific association."
+  },
+  "best_preliminary_specificity_tradeoff": {
+    "trials": 8,
+    "controls_per_trial": 8,
+    "scope": "permanent",
+    "anchor_mode": "margin",
+    "anchor_weight": 3.0,
+    "teacher_lr": 0.3,
+    "teacher_steps": 32,
+    "fresh_session_accuracy": 0.375,
+    "mean_answer_probability": 0.14583043974562315,
+    "mean_answer_rank": 3.5,
+    "taught_token_control_probability": 0.061311736874813505,
+    "taught_token_control_rate": 0.0625,
+    "warning": "The sample is too small for promotion."
+  },
+  "w0_process_restart_smoke": {
+    "trials": 1,
+    "correct": true,
+    "answer_probability": 0.9510690569877625,
+    "answer_rank": 1.0,
+    "conclusion": "A tensor-only W0 overlay survived model reload and a fresh process."
+  },
+  "promotion_gates": {
+    "replicate_at_least_32_trials": false,
+    "specificity_hijack_below_5pct": false,
+    "multi_memory_interference": false,
+    "natural_language_transfer": false,
+    "anchor_regression_gate": false
+  }
+}

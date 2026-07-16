@@ -80,26 +80,43 @@ def prepare(train_mb: int, vocab_size: int) -> None:
     print("done.")
 
 
-def get_batch(split: str, batch_size: int, seq_len: int, device, data_dir: str | None = None):
+def get_batch(split: str, batch_size: int, seq_len: int, device, data_dir: str | None = None,
+              rng=None):
     """Random spans of length seq_len (+1 for the target). seq_len = n_segments × block_size.
     data_dir: where to read the .bin from (default fractal_data) — enables fine-tune on a different corpus."""
     path = os.path.join(data_dir or DATA_DIR, f"{split}.bin")
     data = np.memmap(path, dtype=np.uint16, mode="r")
-    ix = np.random.randint(0, len(data) - seq_len - 1, size=batch_size)
+    generator = np.random if rng is None else rng
+    ix = generator.randint(0, len(data) - seq_len - 1, size=batch_size)
     x = np.stack([data[i:i + seq_len].astype(np.int64) for i in ix])
     y = np.stack([data[i + 1:i + 1 + seq_len].astype(np.int64) for i in ix])
     import torch
     return (torch.from_numpy(x).to(device), torch.from_numpy(y).to(device))
 
 
-def get_masked_batch(split: str, batch_size: int, seq_len: int, device, data_dir: str | None = None):
+def get_masked_batch(split: str, batch_size: int, seq_len: int, device, data_dir: str | None = None,
+                     rng=None, require_loss: bool = True, max_attempts: int = 128):
     """Like get_batch, plus a per-target loss weight w from a parallel uint8 `{split}.mask.bin`
     (1 = train on this token). Used by Phase-2 masked training (loss on assistant/<|tool_call|>/<|end|>
     only). w is aligned to the TARGET y, i.e. w[t] weights predicting y[t]."""
     d = data_dir or DATA_DIR
     data = np.memmap(os.path.join(d, f"{split}.bin"), dtype=np.uint16, mode="r")
     mask = np.memmap(os.path.join(d, f"{split}.mask.bin"), dtype=np.uint8, mode="r")
-    ix = np.random.randint(0, len(data) - seq_len - 1, size=batch_size)
+    if len(mask) != len(data):
+        raise ValueError(f"token/mask length mismatch in {d}: {len(data)} != {len(mask)}")
+    generator = np.random if rng is None else rng
+    starts = []
+    upper = len(data) - seq_len - 1
+    for _ in range(batch_size):
+        for attempt in range(max_attempts):
+            start = int(generator.randint(0, upper))
+            if not require_loss or mask[start + 1:start + 1 + seq_len].any():
+                starts.append(start)
+                break
+        else:
+            raise RuntimeError(
+                f"failed to sample a non-zero loss window after {max_attempts} attempts from {d}")
+    ix = np.asarray(starts, dtype=np.int64)
     x = np.stack([data[i:i + seq_len].astype(np.int64) for i in ix])
     y = np.stack([data[i + 1:i + 1 + seq_len].astype(np.int64) for i in ix])
     w = np.stack([mask[i + 1:i + 1 + seq_len].astype(np.float32) for i in ix])

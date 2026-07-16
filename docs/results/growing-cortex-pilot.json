@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "status": "preliminary_signal",
+  "date": "2026-07-16",
+  "model": {
+    "parameters": 487564,
+    "active_parameters": 151436,
+    "n_embd": 128,
+    "depth": 4,
+    "n_scales": 2,
+    "skill_rank": 8
+  },
+  "curriculum": {
+    "interpreter_steps": 2000,
+    "compiler_steps": 2000,
+    "opaque_names_repermuted_each_episode": true,
+    "held_out_skills": 12,
+    "inputs_per_skill": 32
+  },
+  "results": {
+    "interpreter_accuracy": 0.2552083333333333,
+    "no_skill_accuracy": 0.06770833333333333,
+    "compiled_accuracy": 0.22395833333333334,
+    "sequential_final_accuracy": 0.22395833333333334,
+    "oldest_skill_accuracy": 0.1875,
+    "global_overwrite_final_accuracy": 0.078125,
+    "control_hijack_rate": 0.6666666666666666,
+    "birth_max_logit_difference": 0.0,
+    "restart_accuracy": 0.22395833333333334
+  },
+  "promotion": {
+    "birth_is_function_preserving": true,
+    "interpreter_accuracy_80pct": false,
+    "compiled_skill_accuracy_60pct": false,
+    "sequential_accuracy_70pct": false,
+    "oldest_skill_50pct": false,
+    "control_hijack_below_10pct": false,
+    "beats_global_overwrite_20pp": false,
+    "restart_accuracy_70pct": false
+  },
+  "conclusion": "Append-only growth and restart persistence work, and compiled skills beat both the no-skill and global-overwrite controls. Procedural accuracy and routing specificity remain below the declared gates."
+}

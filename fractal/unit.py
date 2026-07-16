@@ -36,6 +36,7 @@ class FractalState:
     — they only thread it through and store it. State = fast weights per level + a causal conv
     buffer + a running average (for high-pass keys) — all for streaming."""
     W: list[torch.Tensor]            # len n_scales, each (B, n_head, hd, hd)
+    eligibility: list[torch.Tensor] | None = None  # delayed-credit trace, same fixed shape as W
     conv: torch.Tensor | None = None  # (B, conv_k-1, n_embd) — only during streaming
     hp_sum: torch.Tensor | None = None  # (B, n_embd) running sum of features (high-pass)
     hp_n: int = 0                     # number of positions counted
@@ -47,11 +48,16 @@ class FractalState:
     event_count: int = 0                    # positions accumulated in the unfinished patch
 
     def _map(self, fn_w, fn_c):
-        return FractalState([fn_w(w) for w in self.W],
-                            None if self.conv is None else fn_c(self.conv),
-                            None if self.hp_sum is None else fn_c(self.hp_sum), self.hp_n,
-                            None if self.event_prev is None else fn_c(self.event_prev), self.event_n,
-                            None if self.event_sum is None else fn_c(self.event_sum), self.event_count)
+        return FractalState(
+            W=[fn_w(w) for w in self.W],
+            eligibility=(None if self.eligibility is None
+                         else [fn_w(e) for e in self.eligibility]),
+            conv=None if self.conv is None else fn_c(self.conv),
+            hp_sum=None if self.hp_sum is None else fn_c(self.hp_sum), hp_n=self.hp_n,
+            event_prev=None if self.event_prev is None else fn_c(self.event_prev),
+            event_n=self.event_n,
+            event_sum=None if self.event_sum is None else fn_c(self.event_sum),
+            event_count=self.event_count)
 
     def to(self, device):  return self._map(lambda w: w.to(device), lambda c: c.to(device))
     def cpu(self):         return self._map(lambda w: w.cpu(), lambda c: c.cpu())
@@ -100,6 +106,10 @@ class FractalUnit(ComputeUnit):
         self.tau0 = cfg.tau0                 # ladder parameters — needed also for growth (neurogenesis)
         self.rho = cfg.rho
         self.chunk_size = cfg.chunk_size
+        self.event_algebra = bool(getattr(cfg, "event_algebra", False))
+        self.eligibility_decay = float(getattr(cfg, "eligibility_decay", 0.95))
+        if not 0.0 <= self.eligibility_decay <= 1.0:
+            raise ValueError("eligibility_decay must be in [0, 1]")
         self.gammas = _make_gammas(cfg.n_scales, cfg.tau0, cfg.rho)
 
         # shared causal (depthwise) convolution — a position sees a few preceding tokens
@@ -272,7 +282,9 @@ class FractalUnit(ComputeUnit):
 
     # ---- ComputeUnit API ----
     def init_state(self, batch_size, device, dtype=torch.float32) -> FractalState:
-        return FractalState(W=[c.init_state(batch_size, device, dtype) for c in self.cells])
+        weights = [c.init_state(batch_size, device, dtype) for c in self.cells]
+        eligibility = [torch.zeros_like(w) for w in weights] if self.event_algebra else None
+        return FractalState(W=weights, eligibility=eligibility)
 
     def forward(self, x, state: FractalState | None = None, return_delta: bool = False):
         B, T, _ = x.shape
@@ -283,18 +295,29 @@ class FractalUnit(ComputeUnit):
         f_all = torch.sigmoid(self.to_f(xc)).view(B, T, self.n_scales, self.n_head) if self.selective else None
 
         Ws = state.W if state is not None else [None] * self.n_scales
-        outs, new_W, dnorms = [], [], ([] if return_delta else None)
+        Es = state.eligibility if state is not None else None
+        outs, new_W, new_E, dnorms = [], [], [], ([] if return_delta else None)
         for l, cell in enumerate(self.cells):
             W_l = Ws[l] if Ws[l] is not None else cell.start(B, x.device, x.dtype)
             f_l = f_all[:, :, l, :].transpose(1, 2) if f_all is not None else None   # (B,H,T)
-            o_l, W_l, dn = cell.scan(q, k, v, beta, W_l, self._mode(cell), return_delta, f=f_l)
+            if self.event_algebra:
+                previous = None if Es is None else Es[l]
+                o_l, W_l, dn, E_l = cell.scan_eligibility(
+                    q, k, v, beta, W_l, previous, self.eligibility_decay,
+                    return_delta=return_delta, f=f_l)
+            else:
+                o_l, W_l, dn = cell.scan(
+                    q, k, v, beta, W_l, self._mode(cell), return_delta, f=f_l)
             outs.append(o_l)
             new_W.append(W_l)
+            if self.event_algebra:
+                new_E.append(E_l)
             if return_delta:
                 dnorms.append(dn)
         out = self.drop(self.proj(self._combine(outs, xc)))
         return out, FractalState(
             W=new_W,
+            eligibility=new_E if self.event_algebra else None,
             event_prev=None if state is None else state.event_prev,
             event_n=0 if state is None else state.event_n,
             event_sum=None if state is None else state.event_sum,
@@ -314,16 +337,26 @@ class FractalUnit(ComputeUnit):
         q, k, v, beta, new_hp = self._project(x, xc, hp)               # v = raw x; high-pass keys (carry the average)
         f_all = torch.sigmoid(self.to_f(xc)).view(B, T, self.n_scales, self.n_head) if self.selective else None
 
-        outs, new_W = [], []
+        Es = state.eligibility
+        outs, new_W, new_E = [], [], []
         for l, cell in enumerate(self.cells):
             f_l = f_all[:, :, l, :].transpose(1, 2) if f_all is not None else None
-            o_l, W_l, _ = cell.scan(q, k, v, beta, state.W[l], mode="recurrent", f=f_l)
+            W_before = state.W[l]
+            if self.event_algebra:
+                previous = None if Es is None else Es[l]
+                o_l, W_l, _, E_l = cell.scan_eligibility(
+                    q, k, v, beta, W_before, previous, self.eligibility_decay, f=f_l)
+            else:
+                o_l, W_l, _ = cell.scan(q, k, v, beta, W_before, mode="recurrent", f=f_l)
             outs.append(o_l)
             new_W.append(W_l)
+            if self.event_algebra:
+                new_E.append(E_l)
         out = self.drop(self.proj(self._combine(outs, xc)))
         hp_sum, hp_n = new_hp if new_hp is not None else (None, 0)
         return out, FractalState(
-            W=new_W, conv=new_conv, hp_sum=hp_sum, hp_n=hp_n,
+            W=new_W, eligibility=new_E if self.event_algebra else None,
+            conv=new_conv, hp_sum=hp_sum, hp_n=hp_n,
             event_prev=state.event_prev, event_n=state.event_n,
             event_sum=state.event_sum, event_count=state.event_count,
         )

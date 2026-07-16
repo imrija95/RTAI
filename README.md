@@ -27,6 +27,8 @@ negative results alongside successes.
 | Fractal recall study | about 4.6M | two-scale routing was strongest; empty-add neurogenesis failed | Study complete |
 | Plasticity genome | small | one-pass sequence adaptation transferred scale, recall did not | Refuted for declared gate |
 | Efficiency tournament | small | no candidate passed the promotion contract | Negative result |
+| Growing Cortex | 3.00M total / 0.57M active | 16 compiled skills retain 76.2% across append and restart; 0% control hijack | Synthetic mechanism validated |
+| Natural Cortex | 104.55M stored / 65.90M active MoE | atomic English pipeline, deterministic dense/MoE gate, and local rank-8 teaching | MoE selected; resumable run paused at 25M tokens |
 
 The detailed measurements and falsification criteria are in
 [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md). The non-negotiable design contract is
@@ -60,6 +62,27 @@ Run the FractalLM dashboard in truthful learn-from-scratch mode:
 VIZ_LEARN=1 uv run python -m fractal.viz_serve
 # http://localhost:8000
 ```
+
+Run a tokenizer-compatible checkpoint with persistent chat and per-message memory ratings:
+
+```bash
+FRACTAL_CKPT=MODEL.pt VIZ_TOKENIZER=TOKENIZER.json VIZ_CHAT=1 VIZ_FEEDBACK=1 \
+  uv run python -m fractal.viz_serve
+```
+
+Ratings `1..5` weaken, leave neutral, or consolidate a message into delayed-credit memory and a
+bounded `W0` overlay. The mechanism, private runtime files, trainer queue, and falsification screen
+are documented in [`docs/EVENT_ALGEBRA.md`](docs/EVENT_ALGEBRA.md).
+
+`VIZ_CHAT=1` alone provides persistent chat without enabling Event Algebra or `W0` consolidation.
+
+Append-only low-rank skill hemispheres, their meta-compiler, lifecycle, dashboard telemetry, and
+sequential falsification gates are documented in
+[`docs/GROWING_CORTEX.md`](docs/GROWING_CORTEX.md).
+
+The compiler-free English conversational preset, pinned data mix, deterministic dense/MoE gate,
+local teaching runtime, and preflight status are documented in
+[`NATURAL_CORTEX.md`](NATURAL_CORTEX.md).
 
 No checkpoint is currently published or stored in Git. Future model releases will use
 checksum-verified Safetensors on Hugging Face; see

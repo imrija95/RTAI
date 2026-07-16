@@ -8,6 +8,111 @@ rule, adjusted at runtime), not in a growing KV-cache.
 > This notebook contains chronological results. Branch names and local artifacts from the original
 > private research history are archival context, not public release interfaces.
 
+## 2026-07-16 — Natural Cortex selects MoE and pauses resumably at 25M tokens
+
+The Natural Cortex production path now has a fresh 24k byte-level BPE tokenizer with atomic
+chat/tool/teaching markers, a pinned and exact-deduplicated 240M-token English mix, deterministic
+per-source document-hash validation, and a dedicated trainer that excludes the refuted production
+flags. The immutable corpus contains 240,001,141 training tokens and 2,406,475 validation tokens.
+
+The predeclared 10M-token-per-arm screen compared identically initialized dense and four-expert
+top-1 MoE models on the same data order:
+
+| Arm | Throughput | Validation loss | Fast-weight recall |
+| --- | ---: | ---: | ---: |
+| Dense | 4,957 tok/s | 5.0678 | 0.0% |
+| Top-1 MoE | 4,481 tok/s | 5.0412 | 0.0% |
+
+MoE retained 90.4% of dense throughput. Its least-used expert still received 17.7% of traffic, and
+source-routing affinity reached 22.4% maximum pairwise total variation. All declared gates passed,
+so the MoE checkpoint was selected mechanically.
+
+The main run improved validation loss to 4.6318 at 20,000,768 total tokens. It was then paused by
+operator request at the first durable boundary, 25,001,984 tokens, after writing the checkpoint plus
+optimizer and plasticity state. This is a resumable progress result, not a completed or accepted
+model: the 200M chat gate, manual relevance review, and ten-skill teaching evaluation remain unrun.
+Sanitized measurements are in
+[`results/natural-cortex-25m.json`](results/natural-cortex-25m.json).
+
+## 2026-07-16 — Growing Cortex validates addressed, append-only procedural memory
+
+An append-only skill cortex now adds content-addressed low-rank experts without resizing a shared
+router. Candidates are born disabled, share one residual organ across every recurrent depth, and
+change active logits by exactly zero until committed. Expert structure and tensors reload in a fresh
+process.
+
+The first compiler curriculum overfit opaque task names despite near-zero training loss. Reassigning
+names to new procedures every episode removed that shortcut and drove direct instruction-to-weights
+learning back to chance. A two-stage interpreter-then-compiler curriculum recovered a real held-out
+signal: on a 128-wide depth-4 model, compiled skills reached 22.4% exact accuracy versus 6.8% without
+a skill and 7.8% after sequentially overwriting one global expert. Twelve append-only skills retained
+22.4% after restart, but the interpreter itself reached only 25.5% and unseen-task routing hijack was
+66.7%.
+
+The scaled run exposed a train/use mismatch rather than a memory failure. Routing had been trained on
+an average over many calls but deployed from one call, and variable execution arguments were mixed
+into the skill identity. Fresh compiled skills reached 75.8%, while automatic lookup initially fell
+back to chance. Direct tensor and forced-execution checks showed that stored experts remained exactly
+equal to their compiled candidates.
+
+Factoring the stable skill address from the variable execution payload resolved the failure. After a
+short address-specific repair, a 256-wide depth-6 model produced:
+
+- 76.17% exact accuracy for a freshly compiled held-out skill,
+- 76.17% after sixteen skills were appended and routed automatically,
+- 56.2% for the oldest retained skill,
+- 100% correct known-address routing and 0% unseen-address hijack,
+- 76.17% after a fresh-process reload,
+- 2.3% with no skill and 8.6% for one globally overwritten expert,
+- exactly zero logit change at candidate birth.
+
+Every growth, routing, retention, overwrite-control, and restart gate passed. The only failed declared
+gate was the separate interpreter target: 76.2% versus 80%. The mechanistic conclusion is that
+persistent procedural weights can grow safely, but **identity is a control-plane variable and must not
+be entangled with execution payload**. This is a synthetic mechanism validation, not evidence of
+natural-language understanding or arbitrary agent skill acquisition.
+
+Final shorthand: **76.17% exact / 0% unseen-address hijack / 76.17% after restart**. Direct tensor
+and forced-execution checks showed that the apparent pre-repair collapse was not expert forgetting;
+it was a routing train/use mismatch compounded by mixing execution arguments into the stable address.
+
+Protocol and gates: [`GROWING_CORTEX.md`](GROWING_CORTEX.md). Sanitized results:
+[`results/growing-cortex-pilot.json`](results/growing-cortex-pilot.json) and
+[`results/growing-cortex-addressed.json`](results/growing-cortex-addressed.json).
+
+## 2026-07-16 — Vector teaching passes one-memory W0 gate; continual memory fails
+
+Scalar delayed credit changed update norms but did not improve matched recall, and direct
+eligibility-to-W0 consolidation remained at zero fresh-session accuracy. A vector-teaching update
+instead used confirmed next-token error for direction, froze general weights, and changed only the
+permanent W0 scale under a held-out rank-margin anchor.
+
+On the 126M checkpoint, margin weight 5 produced 49/62 correct fresh-session answers across two
+independent seeds (79.0%). The taught token hijacked 49/496 unseen controls (9.88%), and both W0
+overlays reloaded correctly in fresh processes. The synthetic one-memory mechanism gate therefore
+passed.
+
+Sequential writes exposed the remaining blocker. Eight unprotected memories retained 25%.
+A fixed-capacity KL reservoir retained 62.5% but raised learned-answer hijacking to 56.25%;
+protecting all learned answer tokens retained 50% with the same hijack rate. The next candidate must
+allocate or orthogonalize persistent memory subspaces rather than further tuning scalar anchor
+weights. Full measurements: [`results/event-algebra-dl580-2026-07-16.json`](results/event-algebra-dl580-2026-07-16.json).
+
+## 2026-07-15 — Predictive Event Algebra implemented; causal gate not yet run
+
+An opt-in delayed-credit path now carries one constant-size eligibility matrix `E` beside every
+fast matrix `W`. Every token keeps the original delta write; later signed evidence can reinforce or
+oppose the accumulated causal write. Explicit per-message ratings map `1..5` onto `-1..1`, update a
+persistent chat session immediately, and can consolidate a norm-bounded overlay into `W0` so the
+association is present in a fresh session. Rating revisions are idempotent and store a rollback
+overlay first. The dashboard now provides the real persistent agent chat and rating controls.
+
+A live JSONL feedback queue is consumed exactly once by the trainer at safe batch boundaries; W0
+and consumed IDs are saved atomically. General shared weights are deliberately not changed by a
+single rating. A bounded runner compares baseline, autonomous surprise credit, explicit feedback,
+and fresh-session W0 recall with ten-minute reports. No causal-transfer or understanding claim is
+made until that screen passes. Protocol and commands: [`EVENT_ALGEBRA.md`](EVENT_ALGEBRA.md).
+
 ## 2026-07-15 — 4 GB efficiency tournament: no hypothesis passed
 
 The complete four-hour falsification screen finished without a runtime failure. No arm qualified

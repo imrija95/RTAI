@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import math
 import os
+from pathlib import Path
 import threading
 import time
+import uuid
 
 import numpy as np
 import torch
@@ -28,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fractal import persist
 from fractal import tokenizer as tk
+from fractal import chat_format as cf
 
 DEV = os.environ.get("FRACTAL_DEV") or ("cuda" if torch.cuda.is_available() else "cpu")
 WEB = os.path.join(os.path.dirname(__file__), "web")
@@ -37,6 +40,18 @@ DATA_DIR = os.environ.get("VIZ_DATA_DIR", "fractal_data")
 LEARN = os.environ.get("VIZ_LEARN") == "1"  # Train a small model and report sampled gradients.
 ATTACH = os.environ.get("VIZ_ATTACH")       # MIRROR a real run: read telemetry from train.py (don't train)
 LR = float(os.environ.get("VIZ_LR", 3e-3))
+CHAT_ENABLED = os.environ.get("VIZ_CHAT", "0") == "1"
+FEEDBACK_ENABLED = os.environ.get("VIZ_FEEDBACK", "0") == "1"
+CHAT_STATE = os.environ.get("VIZ_CHAT_STATE", "fractal_ui_state.pt")
+CHAT_SESSION = os.environ.get("VIZ_CHAT_SESSION", "fractal_ui_session.json")
+FEEDBACK_WEIGHTS = os.environ.get("VIZ_FEEDBACK_WEIGHTS", CKPT + ".feedback-w0.pt")
+FEEDBACK_QUEUE = os.environ.get("VIZ_FEEDBACK_QUEUE", "fractal_feedback.jsonl")
+AUTH_TOKEN = os.environ.get("VIZ_AUTH_TOKEN", "")
+NATURAL_SKILL_BANK = os.environ.get("VIZ_SKILL_BANK", "")
+if FEEDBACK_ENABLED and not CHAT_ENABLED:
+    raise SystemExit("VIZ_FEEDBACK=1 requires VIZ_CHAT=1")
+if FEEDBACK_ENABLED and (ATTACH or LEARN):
+    raise SystemExit("VIZ_FEEDBACK=1 is available only in checkpoint read mode")
 
 TOK_PATH = os.environ.get("VIZ_TOKENIZER", "fractal_tokenizer.json")
 tok = tk.load(TOK_PATH) if os.path.exists(TOK_PATH) else None
@@ -79,12 +94,79 @@ else:
         raise SystemExit(f"read mode requires a tokenizer: {TOK_PATH}")
     model = persist.load_model(CKPT, DEV)
     model.eval()
+    if CHAT_ENABLED:
+        if tok is None or tok.get_vocab_size() != model.cfg.vocab_size:
+            got = None if tok is None else tok.get_vocab_size()
+            raise SystemExit(f"chat tokenizer/model vocabulary mismatch: tokenizer={got}, "
+                             f"model={model.cfg.vocab_size}; set VIZ_TOKENIZER to the training tokenizer")
+    if FEEDBACK_ENABLED:
+        from fractal import feedback
+        feedback.enable(model)
+        feedback.load_w0(FEEDBACK_WEIGHTS, model)
     val_path = os.path.join(DATA_DIR, "val.bin")
+    if not os.path.exists(val_path):
+        manifest_path = os.path.join(DATA_DIR, "manifest.json")
+        if os.path.exists(manifest_path):
+            with open(manifest_path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            shards = manifest.get("splits", {}).get("val", {}).get("shards", [])
+            if shards:
+                val_path = os.path.join(DATA_DIR, shards[0]["tokens"])
     if not os.path.exists(val_path):
         raise SystemExit(f"read mode requires validation data: {val_path}")
     data = np.memmap(val_path, dtype=np.uint16, mode="r")
 if model is not None:
     unit = model.block.unit
+
+
+def _atomic_json(path, payload):
+    """Write private session metadata atomically beside its destination."""
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+
+
+def _load_chat_messages():
+    try:
+        with open(CHAT_SESSION, encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, list) else []
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+_chat_messages = _load_chat_messages() if CHAT_ENABLED else []
+_chat_states = None
+_natural_runtime = None
+if CHAT_ENABLED:
+    if os.path.exists(CHAT_STATE):
+        try:
+            _chat_states = persist.load_states(CHAT_STATE, DEV)
+        except (OSError, ValueError, RuntimeError):
+            _chat_states = None
+    if _chat_states is None:
+        _chat_states = model.init_states(1, DEV)
+    if NATURAL_SKILL_BANK:
+        from fractal.natural_runtime import NaturalRuntimeSession, SkillBank
+        _natural_bank = SkillBank(NATURAL_SKILL_BANK, model, CKPT)
+        _natural_runtime = NaturalRuntimeSession(
+            model, tok, _natural_bank, DEV, _chat_states, CHAT_STATE)
+
+
+def _message(role, content, **extra):
+    item = {"id": uuid.uuid4().hex, "role": role, "content": str(content),
+            "rating": None, "revision": 0, "created_at": time.time()}
+    if role in ("user", "assistant") and "rating_disabled" not in extra:
+        item["rating_disabled"] = not FEEDBACK_ENABLED
+    item.update(extra)
+    _chat_messages.append(item)
+    return item
 
 
 _attach_last = None
@@ -120,6 +202,7 @@ def _cfg():
                 "active_params": t.get("active_params"),
                 "event_budget": t.get("event_budget"),
                 "event_share": t.get("event_share"),
+                "growing_cortex": t.get("growing_cortex"),
                 "effective_depth": t.get("effective_depth", t.get("depth", 6)),
                 "update_mode": t.get("update_mode"), "arm": t.get("arm"),
                 "n_head": t.get("n_head"), "mlp_ratio": t.get("mlp_ratio"),  # None on older telemetry → client default
@@ -137,6 +220,11 @@ def _cfg():
             "event_budget": getattr(model.cfg, "event_budget", 1.0),
             "n_head": model.cfg.n_head, "mlp_ratio": getattr(model.cfg, "mlp_ratio", 2),
             "params": round(sum(p.numel() for p in model.parameters()) / 1e6, 2),
+            "event_algebra": bool(getattr(model.cfg, "event_algebra", False)),
+            "growing_cortex": (
+                None if model.skill_cortex is None else model.skill_cortex.snapshot()),
+            "chat_enabled": CHAT_ENABLED,
+            "feedback_enabled": FEEDBACK_ENABLED,
             "batch": (BATCH if LEARN else None), "block": (BLK if LEARN else None),  # → client tok/s (learn mode)
             "vram_gb": (round(torch.cuda.max_memory_allocated() / 1e9, 3)
                         if DEV.startswith("cuda") else None),
@@ -204,7 +292,11 @@ def _grad_parts(m):
     already exist after .backward() (to_qk, to_beta, proj, MLP/router) — no extra compute."""
     def _n(p):
         return float(p.grad.norm()) if (p is not None and p.grad is not None) else 0.0
-    parts = {"qk": [], "beta": [], "proj": [], "mlp": []}
+    def _module_n(module):
+        if module is None:
+            return 0.0
+        return sum(_n(parameter) ** 2 for parameter in module.parameters()) ** 0.5
+    parts = {"qk": [], "beta": [], "proj": [], "mlp": [], "skill": []}
     for d in range(m.cfg.depth):
         u = m.block_at(d).unit
         mlp = m.block_at(d).mlp
@@ -215,6 +307,11 @@ def _grad_parts(m):
             parts["mlp"].append(round(_n(mlp.router.weight), 5))
         else:
             parts["mlp"].append(round((_n(mlp.fc.weight) ** 2 + _n(mlp.proj.weight) ** 2) ** 0.5, 5))
+        skill = m.skill_cortex
+        parts["skill"].append(round(
+            0.0 if skill is None else (
+                _module_n(skill.compiler) ** 2 + _module_n(skill.query_proj) ** 2
+            ) ** 0.5, 5))
     return parts
 
 
@@ -254,6 +351,9 @@ def activity():
 
         wn = [[float(_states[d].W[l].norm()) for l in range(L)] for d in range(D)]
         wmax = max((v for row in wn for v in row), default=1.0) or 1.0
+        en = [[float(_states[d].eligibility[l].norm()) for l in range(L)]
+              for d in range(D)] if _states[0].eligibility is not None else None
+        emax = max((v for row in (en or []) for v in row), default=1.0) or 1.0
 
         gate = [[round(float(g), 3) for g in
                  _gcalls[d].view(-1, H, L).softmax(-1).mean(dim=(0, 1))]
@@ -269,6 +369,8 @@ def activity():
             if birth is not None:
                 for d in range(D):    # migrate carried state: append the empty W of the new scale
                     _states[d].W.append(model.block_at(d).unit.cells[-1].init_state(1, DEV))
+                    if _states[d].eligibility is not None:
+                        _states[d].eligibility.append(torch.zeros_like(_states[d].W[-1]))
                 _register_gate_hooks()
                 _prev_delta = None
                 _born_pending = True
@@ -278,6 +380,8 @@ def activity():
         lv = float(loss)
         return {"dW": [[round(min(v / _runmax, 1.0), 3) for v in row] for row in dW],
                 "Wn": [[round(v / wmax, 3) for v in row] for row in wn],
+                "En": ([[round(v / emax, 3) for v in row] for row in en]
+                       if en is not None else None),
                 "res": res, "gate": gate,
                 "loss": round(lv, 3), "ppl": round(math.exp(min(lv, 20)), 1),
                 "ms": round(ms), "text": tok.decode(ids[0].tolist()),
@@ -286,7 +390,9 @@ def activity():
                             if DEV.startswith("cuda") else None),
                 "n_scales": L,          # scale count CONSISTENT with this tick's arrays (after birth it jumps next tick)
                 "gammas": [round(float(g), 4) for g in unit.gammas[:L]], "taus": _taus()[:L],
-                "born": born}
+                "born": born,
+                "growing_cortex": (
+                    None if model.skill_cortex is None else model.skill_cortex.snapshot())}
 
 
 def learn_step():
@@ -360,7 +466,9 @@ def learn_step():
                 "vram_gb": (round(torch.cuda.max_memory_allocated() / 1e9, 3)
                             if DEV.startswith("cuda") else None),
                 "n_scales": L, "gammas": [round(float(g), 4) for g in unit.gammas[:L]],
-                "taus": _taus()[:L], "born": False}
+                "taus": _taus()[:L], "born": False,
+                "growing_cortex": (
+                    None if model.skill_cortex is None else model.skill_cortex.snapshot())}
 
 
 def attach_activity():
@@ -446,7 +554,110 @@ def attach_activity():
                 "update_mode": t.get("update_mode"),
                 "expert_usage": t.get("expert_usage"),
                 "selected_expert": t.get("selected_expert"),
+                "growing_cortex": t.get("growing_cortex"),
                 "vram_gb": t.get("peak_vram_gb", t.get("vram_gb")), **fresh}
+
+
+_last_feedback = None
+
+
+def _chat_turn(text):
+    """Run one serialized persistent agent turn and durably save its private session state."""
+    global _chat_states
+    if not CHAT_ENABLED:
+        return 409, {"error": "chat is disabled in this dashboard mode"}
+    clean = str(text).strip()
+    if not clean:
+        return 400, {"error": "message must not be empty"}
+    if len(clean.encode("utf-8")) > 32_768:
+        return 413, {"error": "message exceeds the 32 KiB limit"}
+    from fractal import agent
+    with _lock:
+        created = [_message("user", clean)]
+        generation = {
+            "max_new": int(os.environ.get("VIZ_CHAT_MAX_NEW", 200)),
+            "max_tool_calls": int(os.environ.get("VIZ_CHAT_MAX_TOOLS", 6)),
+            "temperature": float(os.environ.get("VIZ_CHAT_TEMPERATURE", 0.8)),
+            "top_k": int(os.environ.get("VIZ_CHAT_TOP_K", 40)),
+            "json_guard": os.environ.get("VIZ_JSON_GUARD") == "1",
+        }
+        if _natural_runtime is not None:
+            result = _natural_runtime.chat(clean, **generation)
+            transcript = result["transcript"]
+            _chat_states = _natural_runtime.states
+        else:
+            transcript, _chat_states = agent.run_turn(
+                model, tok, _chat_states, clean, DEV, **generation)
+        for role, content in transcript:
+            if role == "assistant":
+                created.append(_message("assistant", content))
+            elif role in ("tool_call", "tool_result", "note"):
+                rendered = (json.dumps(content, ensure_ascii=False)
+                            if not isinstance(content, str) else content)
+                created.append(_message(role, rendered, rating_disabled=True))
+        persist.save_states(CHAT_STATE, _chat_states)
+        _atomic_json(CHAT_SESSION, _chat_messages)
+    return 200, {"messages": created}
+
+
+def _feedback_text(item):
+    marker = cf.USER if item["role"] == "user" else cf.ASSISTANT
+    return f"{marker}\n{item['content']}"
+
+
+def _submit_feedback(message_id, rating, requested_revision=None):
+    """Apply one user-authority rating revision exactly once."""
+    global _last_feedback
+    if not FEEDBACK_ENABLED:
+        return 409, {"error": "feedback is disabled in this dashboard mode"}
+    try:
+        new_credit = feedback.credit_for_rating(rating)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+    with _lock:
+        item = next((m for m in _chat_messages if m.get("id") == message_id), None)
+        if item is None:
+            return 404, {"error": "message was not found"}
+        if item.get("rating_disabled") or item.get("role") not in ("user", "assistant"):
+            return 400, {"error": "this message cannot be rated"}
+        current_revision = int(item.get("revision", 0))
+        if requested_revision is not None and int(requested_revision) != current_revision + 1:
+            if int(item.get("rating") or 0) == int(rating) and int(requested_revision) <= current_revision:
+                return 200, {"message": item, "duplicate": True, "feedback": _last_feedback}
+            return 409, {"error": "stale feedback revision", "message": item}
+        old_rating = item.get("rating")
+        if old_rating == int(rating):
+            return 200, {"message": item, "duplicate": True, "feedback": _last_feedback}
+        old_credit = feedback.credit_for_rating(old_rating) if old_rating is not None else 0.0
+        credit_delta = new_credit - old_credit
+        token_ids = tok.encode(_feedback_text(item)).ids
+        evidence = feedback.message_eligibility(model, token_ids, DEV)
+        fast_norm = feedback.apply_to_state(_chat_states, evidence, credit_delta)
+        w0_norm = 0.0
+        if credit_delta:
+            feedback.save_w0(FEEDBACK_WEIGHTS + ".rollback", model)
+            w0_norm = feedback.consolidate_w0(model, evidence, credit_delta)
+            feedback.save_w0(FEEDBACK_WEIGHTS, model)
+        item["rating"] = int(rating)
+        item["revision"] = current_revision + 1
+        item["rated_at"] = time.time()
+        item["feedback_source"] = "user"
+        persist.save_states(CHAT_STATE, _chat_states)
+        _atomic_json(CHAT_SESSION, _chat_messages)
+        _last_feedback = {
+            "message_id": message_id, "rating": int(rating), "credit_delta": credit_delta,
+            "fast_update_norm": fast_norm, "w0_update_norm": w0_norm,
+            "eligibility_norm": sum(float(e.norm()) for s in evidence
+                                    for e in (s.eligibility or [])),
+            "source": "user", "time": time.time(),
+        }
+        feedback.append_event(FEEDBACK_QUEUE, {
+            "event_id": uuid.uuid4().hex, "message_id": message_id,
+            "message_revision": item["revision"], "role": item["role"],
+            "content": item["content"], "rating": int(rating),
+            "credit_delta": credit_delta, "source": "user", "created_at": time.time(),
+        })
+        return 200, {"message": item, "feedback": _last_feedback}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -457,8 +668,36 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _json(self, code, payload):
+        self._send(code, json.dumps(payload, ensure_ascii=False).encode(),
+                   "application/json; charset=utf-8")
+
+    def _authorized(self):
+        if not AUTH_TOKEN:
+            return True
+        supplied = self.headers.get("Authorization", "")
+        return supplied == f"Bearer {AUTH_TOKEN}" or self.headers.get("X-RTAI-Token") == AUTH_TOKEN
+
+    def _body(self):
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise ValueError("invalid content length")
+        if size <= 0 or size > 65_536:
+            raise ValueError("request body must be between 1 byte and 64 KiB")
+        try:
+            value = json.loads(self.rfile.read(size))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("request body must be valid JSON") from exc
+        if not isinstance(value, dict):
+            raise ValueError("request JSON must be an object")
+        return value
+
     def do_GET(self):
         p = self.path.split("?")[0]
+        if p not in ("/", "/fractal3d.html") and not self._authorized():
+            self._json(401, {"error": "unauthorized"})
+            return
         if p in ("/", "/fractal3d.html"):
             with open(os.path.join(WEB, "fractal3d.html"), "rb") as f:
                 self._send(200, f.read(), "text/html; charset=utf-8")
@@ -466,9 +705,96 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps(CFG).encode(), "application/json")
         elif p == "/activity":
             payload = attach_activity() if ATTACH else (learn_step() if LEARN else activity())
+            payload["feedback"] = _last_feedback
+            payload["autonomous_credit"] = (getattr(model, "_last_autonomous_credit", None)
+                                                if model is not None else None)
+            payload["skill_route"] = (getattr(model, "_last_skill_route", None)
+                                       if model is not None else None)
+            payload["natural_runtime"] = (
+                None if _natural_runtime is None else _natural_runtime.snapshot())
+            if payload.get("growing_cortex") is None and model is not None \
+                    and model.skill_cortex is not None:
+                payload["growing_cortex"] = model.skill_cortex.snapshot()
+            if payload["autonomous_credit"] is not None:
+                payload["update_mode"] = "predictive-event-credit"
             self._send(200, json.dumps(payload).encode(), "application/json")
+        elif p == "/api/session":
+            if not self._authorized():
+                self._json(401, {"error": "unauthorized"})
+            else:
+                self._json(200, {"enabled": CHAT_ENABLED, "messages": _chat_messages,
+                                 "checkpoint": os.path.basename(CKPT),
+                                 "feedback": _last_feedback,
+                                 "growing_cortex": (
+                                     None if model is None or model.skill_cortex is None
+                                     else model.skill_cortex.snapshot()),
+                                 "natural_runtime": (
+                                     None if _natural_runtime is None
+                                     else _natural_runtime.snapshot())})
         else:
             self._send(404, b"not found", "text/plain")
+
+    def do_POST(self):
+        p = self.path.split("?")[0]
+        if not self._authorized():
+            self._json(401, {"error": "unauthorized"})
+            return
+        try:
+            body = self._body()
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        if p == "/api/chat":
+            code, payload = _chat_turn(body.get("message", ""))
+            self._json(code, payload)
+        elif p == "/api/feedback":
+            code, payload = _submit_feedback(body.get("message_id"), body.get("rating"),
+                                             body.get("revision"))
+            self._json(code, payload)
+        elif p.startswith("/api/skill/"):
+            if _natural_runtime is None:
+                self._json(409, {"error": "Natural Cortex skill runtime is disabled"})
+                return
+            try:
+                if p == "/api/skill/propose":
+                    payload = _natural_runtime.propose_skill(body.get("text", ""))
+                elif p == "/api/skill/suggest":
+                    payload = _natural_runtime.suggest_skill(
+                        body.get("user", ""), body.get("assistant", ""))
+                elif p == "/api/skill/activate":
+                    payload = _natural_runtime.activate(
+                        int(body["expert_id"]), confirmed=bool(body.get("confirmed")))
+                elif p == "/api/skill/teach":
+                    payload = _natural_runtime.teach(
+                        body.get("name", ""), body.get("synopsis", ""),
+                        body.get("demonstrations") or [],
+                        confirmed=bool(body.get("confirmed")),
+                        anchors=body.get("anchors") or [],
+                        steps=int(body.get("steps", 64)),
+                        lr=float(body.get("lr", 1e-2)),
+                    )
+                elif p == "/api/skill/rate":
+                    payload = _natural_runtime.rate(int(body["rating"]))
+                elif p == "/api/skill/quarantine":
+                    payload = _natural_runtime.quarantine(int(body["expert_id"]))
+                elif p == "/api/skill/rollback":
+                    payload = _natural_runtime.rollback(int(body["expert_id"]))
+                elif p == "/api/skill/restart-verification":
+                    payload = _natural_runtime.restart_verification(CKPT, CHAT_STATE)
+                elif p == "/api/skill/calibrate-addresses":
+                    payload = _natural_runtime.calibrate_addresses(
+                        body.get("examples") or [],
+                        steps=int(body.get("steps", 200)),
+                        lr=float(body.get("lr", 1e-3)),
+                    )
+                else:
+                    self._json(404, {"error": "not found"})
+                    return
+                self._json(200, payload)
+            except (KeyError, TypeError, ValueError, RuntimeError, OSError) as exc:
+                self._json(400, {"error": str(exc)})
+        else:
+            self._json(404, {"error": "not found"})
 
     def log_message(self, *a):
         pass
@@ -476,8 +802,15 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
+    host = os.environ.get("HOST", "127.0.0.1")
+    if host not in ("127.0.0.1", "localhost", "::1") and not AUTH_TOKEN:
+        raise SystemExit("VIZ_AUTH_TOKEN is required when HOST is not loopback")
     src = (f"ATTACH ↔ {ATTACH}" if ATTACH else
            ("LEARN (learning from scratch)" if LEARN else f"model {CKPT}"))
-    print(f"FractalLM telemetry: http://localhost:{port}   [{src}, dev: {DEV}]  Ctrl-C to quit",
+    print(f"FractalLM telemetry: http://{host}:{port}   [{src}, dev: {DEV}]  Ctrl-C to quit",
           flush=True)
-    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    with ThreadingHTTPServer((host, port), Handler) as server:
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass

@@ -1,0 +1,67 @@
+{
+  "ab_screen": {
+    "dense": {
+      "elapsed_seconds": 2017.6907394470181,
+      "recall": 0.0,
+      "tokens": 10002432,
+      "tokens_per_second": 4957.36626255287,
+      "validation_loss": 5.067782461643219
+    },
+    "gates": {
+      "every_expert_at_least_10pct": true,
+      "fast_weight_recall_no_2pp_regression": true,
+      "source_affinity_tv_at_least_5pct": true,
+      "throughput_at_least_85pct_dense": true,
+      "validation_loss_within_2pct": true
+    },
+    "identical_data_order": true,
+    "identical_dense_stem": true,
+    "moe": {
+      "elapsed_seconds": 2232.3575803629938,
+      "expert_usage": [
+        0.3453369140625,
+        0.2843017578125,
+        0.1767578125,
+        0.193603515625
+      ],
+      "maximum_pairwise_source_tv": 0.2236328125,
+      "recall": 0.0,
+      "tokens": 10002432,
+      "tokens_per_second": 4480.658514561788,
+      "validation_loss": 5.041173279285431
+    },
+    "selected": "moe",
+    "throughput_fraction_of_dense": 0.903839
+  },
+  "corpus": {
+    "tokenizer_atomic": true,
+    "train_tokens": 240001141,
+    "validation_reproducible": true,
+    "validation_tokens": 2406475
+  },
+  "date": "2026-07-16",
+  "main_run": {
+    "anneal_chat_65pct": false,
+    "best_validation_loss": 4.631796583533287,
+    "best_validation_tokens": 20000768,
+    "checkpoint": "checkpoint-000025001984.pt",
+    "elapsed_seconds": 3403.2614008599776,
+    "main_stage_tokens_per_second": 4407.405201,
+    "resumable_optimizer_and_plasticity_state": true,
+    "steps": 6104,
+    "stop_reason": "operator_requested_pause_at_first_25m_boundary",
+    "tokens": 25001984
+  },
+  "model": {
+    "active_parameters": 65895512,
+    "stored_parameters": 104553048,
+    "variant": "top1_moe_4_experts"
+  },
+  "release_status": {
+    "base_chat_gate_run": false,
+    "final_acceptance_run": false,
+    "model_release_approved": false,
+    "training_complete": false
+  },
+  "schema_version": 1
+}

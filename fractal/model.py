@@ -45,6 +45,14 @@ class Config:
     n_experts: int = 1             # functional MoE experts in the MLP (1 = full MLP; >1 = router + K disjoint MLPs)
     moe_mode: str = "soft"         # soft = all experts; top1 = true sparse token dispatch
     event_budget: float = 1.0       # fraction of positions sent through the expensive memory unit
+    event_algebra: bool = False     # accumulate O(1) eligibility traces for delayed feedback
+    eligibility_decay: float = 0.95 # retention of the local credit trace per streamed token
+    growing_cortex: bool = False    # append-only persistent low-rank skill hemispheres
+    skill_rank: int = 8             # active skill residual rank (one shared expert per token)
+    skill_compiler: str = "none"    # none = local teaching; full = archived E²×rank experiment
+    skill_address_dim: int = 64     # factorized address size for locally taught skills
+    skill_router_threshold: float = 0.25
+    skill_auto_route: bool = False
 
     @property
     def head_dim(self) -> int:
@@ -169,7 +177,7 @@ class Block(nn.Module):
             return z[:, :0], z.new_empty((0,), dtype=torch.long), state
         return torch.cat(summaries, dim=1), torch.tensor(positions, device=z.device), state
 
-    def forward(self, x, state=None, return_delta=False):
+    def forward(self, x, state=None, return_delta=False, skill_cortex=None):
         z = self.ln1(x)
         patches, idx, state = self._event_patches(z, state)
         if patches is None:
@@ -185,10 +193,13 @@ class Block(nn.Module):
             state.event_sum, state.event_count, state.event_n = partial_sum, partial_count, event_n
             state.event_prev = z[:, -1]
         x = x + y
-        x = x + self.mlp(self.ln2(x))
+        z = self.ln2(x)
+        x = x + self.mlp(z)
+        if skill_cortex is not None:
+            x = x + skill_cortex(z)
         return x, state, dn
 
-    def step(self, x, state):
+    def step(self, x, state, skill_cortex=None):
         z = self.ln1(x)
         patches, idx, state = self._event_patches(z, state)
         if patches is None:
@@ -204,7 +215,10 @@ class Block(nn.Module):
             state.event_sum, state.event_count, state.event_n = partial_sum, partial_count, event_n
             state.event_prev = z[:, -1]
         x = x + y
-        x = x + self.mlp(self.ln2(x))
+        z = self.ln2(x)
+        x = x + self.mlp(z)
+        if skill_cortex is not None:
+            x = x + skill_cortex(z)
         return x, state
 
 
@@ -222,6 +236,16 @@ class FractalLM(nn.Module):
         self.ln_f = nn.LayerNorm(cfg.n_embd, bias=cfg.bias)
         self.head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
         self.head.weight = self.tok_emb.weight      # weight tying
+        self.skill_cortex = None
+        if getattr(cfg, "growing_cortex", False):
+            from fractal.growing_cortex import GrowingCortex
+            self.skill_cortex = GrowingCortex(
+                cfg.n_embd, rank=cfg.skill_rank,
+                compiler_mode=cfg.skill_compiler,
+                address_dim=cfg.skill_address_dim,
+                router_threshold=cfg.skill_router_threshold,
+                auto_route=cfg.skill_auto_route,
+            )
         self.apply(self._init_weights)
         # Module-wide initialization randomizes copied experts independently. Restore exact
         # function-preserving mitosis after it; loading a checkpoint overwrites these values.
@@ -235,6 +259,7 @@ class FractalLM(nn.Module):
               f"{' (untied)' if cfg.untie else ' (weight-tied)'} | n_scales={cfg.n_scales}"
               f" | n_embd={cfg.n_embd} γ={[round(g,3) for g in self.block.unit.gammas]}"
               f" | moe={getattr(cfg, 'moe_mode', 'soft')}"
+              f" | skills={'grow' if self.skill_cortex is not None else 'off'}"
               f" | event_budget={getattr(cfg, 'event_budget', 1.0):.2f}")
 
     def parameter_counts(self) -> tuple[int, int]:
@@ -246,6 +271,9 @@ class FractalLM(nn.Module):
             if isinstance(mlp, MoEMLP) and mlp.mode == "top1":
                 inactive += sum(p.numel() for expert in mlp.experts[1:]
                                 for p in expert.parameters())
+        if self.skill_cortex is not None:
+            cortex_stored = sum(p.numel() for p in self.skill_cortex.parameters())
+            inactive += cortex_stored - self.skill_cortex.inference_parameter_count()
         return stored, stored - inactive
 
     def event_share(self) -> float:
@@ -264,6 +292,26 @@ class FractalLM(nn.Module):
         ls = [b.mlp.pop_balance_loss() for b in self.blocks if hasattr(b.mlp, "pop_balance_loss")]
         ls = [x for x in ls if x is not None]
         return sum(ls) / len(ls) if ls else None
+
+    def compile_skill(self, idx):
+        if self.skill_cortex is None:
+            raise ValueError("growing cortex is disabled")
+        if self.skill_cortex.compiler is None:
+            raise ValueError("the production skill bank uses local teaching, not a hypernetwork compiler")
+        features = self.tok_emb(idx)
+        return self.skill_cortex.compile(features)
+
+    def route_skill_from_ids(self, idx) -> tuple[int | None, float]:
+        """Select a mature skill from token IDs without changing any model state."""
+        if self.skill_cortex is None:
+            return None, -1.0
+        with torch.no_grad():
+            features = self.tok_emb(idx)
+            query = self.skill_cortex.address(features)[0]
+            expert_id, similarity = self.skill_cortex.nearest(query)
+            if similarity < self.skill_cortex.router_threshold:
+                return None, similarity
+            return expert_id, similarity
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -291,10 +339,12 @@ class FractalLM(nn.Module):
             blk = self.block_at(d)
             if ckpt:                                   # gradient checkpointing (saves VRAM)
                 x = torch.utils.checkpoint.checkpoint(
-                    lambda inp, b=blk: b(inp, None, False)[0], x, use_reentrant=False)
+                    lambda inp, b=blk: b(
+                        inp, None, False, skill_cortex=self.skill_cortex)[0],
+                    x, use_reentrant=False)
             else:
                 st = states[d] if states is not None else None
-                x, st, dn = blk(x, st, return_delta)
+                x, st, dn = blk(x, st, return_delta, skill_cortex=self.skill_cortex)
                 new_states.append(st)
                 if return_delta:
                     all_dn.append(dn)
@@ -318,7 +368,7 @@ class FractalLM(nn.Module):
         x = self.drop(self.tok_emb(idx))
         new_states = []
         for d in range(depth):
-            x, st = self.block_at(d).step(x, states[d])
+            x, st = self.block_at(d).step(x, states[d], skill_cortex=self.skill_cortex)
             new_states.append(st)
         return self.head(self.ln_f(x)), new_states
 

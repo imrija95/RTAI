@@ -1,11 +1,10 @@
-"""Train a fresh byte-level BPE tokenizer on a SAMPLE of the quality mix — SAFE / non-destructive.
+"""Train a fresh byte-level BPE tokenizer on a sample of a selected corpus recipe.
 
-Writes a NEW file (default fractal_tokenizer_32k.json); it never touches fractal_tokenizer.json.
-A representative sample of the mix (a few hundred MB of text) is enough to learn a good vocab; a
-larger vocab (32k) compresses educational text and especially code far better than the 16k tokenizer
-(which was trained on simple stories), so more real content fits per token.
+The output must not exist. Natural Cortex uses a 24k vocabulary and atomic chat/tool/teaching
+markers; older recipes remain available for archived experiments.
 
-Run:  uv run python -m fractal.train_tokenizer --vocab_size 32000 --out fractal_tokenizer_32k.json
+Run: uv run python -m fractal.train_tokenizer --recipe natural --vocab_size 24000 \
+         --out natural_tokenizer_24k.json
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import argparse
 import os
 
 from fractal import tokenizer as tk
-from fractal.data_mix import MIX, Source
+from fractal.data_mix import RECIPES, Source
 
 
 def sample_iter(sources, max_chars):
@@ -38,11 +37,17 @@ def sample_iter(sources, max_chars):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--vocab_size", type=int, default=32000)
-    ap.add_argument("--out", default="fractal_tokenizer_32k.json")
-    ap.add_argument("--max_chars", type=int, default=120_000_000)   # ~120 MB sample → good 32k vocab
+    ap.add_argument("--vocab_size", type=int, default=24000)
+    ap.add_argument("--out", default="natural_tokenizer_24k.json")
+    ap.add_argument("--max_chars", type=int, default=120_000_000)
+    ap.add_argument("--recipe", default="natural", choices=["natural", *sorted(RECIPES)])
     a = ap.parse_args()
-    sources = [Source(n, c, k, w) for n, c, k, w in MIX]
+    if a.recipe == "natural":
+        from fractal.natural_data import train_tokenizer
+        train_tokenizer(a.out, a.vocab_size, a.max_chars)
+        print(f"done → {a.out}", flush=True)
+        raise SystemExit(0)
+    sources = [Source(n, c, k, w) for n, c, k, w in RECIPES[a.recipe]]
     print(f"training {a.vocab_size} byte-level BPE on ~{a.max_chars:,} chars of the mix → {a.out}",
           flush=True)
     tk.train_bpe(sample_iter(sources, a.max_chars), a.vocab_size, a.out)

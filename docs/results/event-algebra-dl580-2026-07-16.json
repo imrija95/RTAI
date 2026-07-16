@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "status": "preliminary_mechanism_pass",
+  "date": "2026-07-16",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 3060 12GB",
+    "numa_local_execution": true
+  },
+  "checkpoint": {
+    "name": "fractal_ckpt_chat_phase2b.pt",
+    "parameters": 126100000
+  },
+  "task": {
+    "type": "held-out synthetic associative recall",
+    "n_facts": 1,
+    "distance": 0,
+    "teacher_scope": "permanent",
+    "teacher_lr": 0.3,
+    "teacher_steps": 32,
+    "teacher_max_fraction": 0.5,
+    "anchor_mode": "margin",
+    "anchor_weight": 5.0,
+    "anchors_per_trial": 8,
+    "controls_per_trial": 8
+  },
+  "single_memory_runs": [
+    {
+      "seed": 4001,
+      "trials": 30,
+      "correct": 22,
+      "accuracy": 0.7333333333333333,
+      "controls": 240,
+      "hijacks": 18,
+      "hijack_rate": 0.075,
+      "target_probability": 0.6489630842153322,
+      "control_taught_probability": 0.05226338138718927,
+      "mrr": 0.798658140225644,
+      "session_restart": true,
+      "w0_process_restart": true
+    },
+    {
+      "seed": 7001,
+      "trials": 32,
+      "correct": 27,
+      "accuracy": 0.84375,
+      "controls": 256,
+      "hijacks": 31,
+      "hijack_rate": 0.12109375,
+      "target_probability": 0.7433641661086767,
+      "control_taught_probability": 0.07388287703836627,
+      "mrr": 0.8633394884269497,
+      "session_restart": true,
+      "w0_process_restart": true
+    }
+  ],
+  "single_memory_aggregate": {
+    "seeds": 2,
+    "trials": 62,
+    "correct": 49,
+    "accuracy": 0.7903225806451613,
+    "controls": 496,
+    "hijacks": 49,
+    "hijack_rate": 0.09879032258064516,
+    "target_probability": 0.6976862232570584,
+    "control_taught_probability": 0.06342183075553869,
+    "mrr": 0.8320420618779308,
+    "w0_process_restart_passes": 2
+  },
+  "sequential_eight_memory_runs": [
+    {
+      "name": "unprotected",
+      "final_memory_accuracy": 0.25,
+      "oldest_memory_survives": false,
+      "wrong_learned_answer_rate": 0.375,
+      "control_hijack_rate": 0.1875,
+      "restart_memory_accuracy": 0.25
+    },
+    {
+      "name": "fixed_kl_reservoir",
+      "reservoir_capacity": 8,
+      "preserve_weight": 1.0,
+      "final_memory_accuracy": 0.625,
+      "oldest_memory_survives": false,
+      "wrong_learned_answer_rate": 0.375,
+      "control_hijack_rate": 0.5625,
+      "restart_memory_accuracy": 0.625
+    },
+    {
+      "name": "reservoir_with_all_answer_protection",
+      "reservoir_capacity": 8,
+      "preserve_weight": 1.0,
+      "final_memory_accuracy": 0.5,
+      "oldest_memory_survives": false,
+      "wrong_learned_answer_rate": 0.375,
+      "control_hijack_rate": 0.5625,
+      "restart_memory_accuracy": 0.5
+    }
+  ],
+  "performance": {
+    "optimization": "Disable unused eligibility collection during W0 gradients and batch equal-length anchors.",
+    "large_model_trial_before_optimization": "more than 300 seconds without a completed trial",
+    "large_model_trial_after_optimization_seconds": 17.46,
+    "measured_speedup_lower_bound": 17.18
+  },
+  "promotion_gates": {
+    "single_memory_accuracy_above_50pct": true,
+    "aggregate_hijack_below_10pct": true,
+    "two_independent_seeds": true,
+    "w0_process_restart": true,
+    "sequential_memory_accuracy_above_50pct": false,
+    "oldest_memory_survives": false,
+    "sequential_hijack_below_10pct": false,
+    "natural_language_transfer": false
+  },
+  "conclusion": "Vector teaching can write one prompt-specific association into persistent W0 and survive a fresh process. Sequential writes still interfere catastrophically or create a competing learned-answer set. The next mechanism must allocate or orthogonalize persistent memory subspaces before natural-language promotion."
+}

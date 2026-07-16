@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from contextlib import nullcontext
 import datetime
 import json
 import operator
@@ -154,9 +155,24 @@ def execute_tool(name, args):
 
 # ---- generation primitives (carry / update W) -----------------------------------------------
 @torch.no_grad()
-def _feed(model, states, ids, dev):
-    """Run ids through the persistent stream; returns (logits, new_states). W is updated."""
-    return model.forward_stream(torch.tensor([ids], device=dev), states)
+def _feed(model, states, ids, dev, autonomous_evidence=False):
+    """Run ids through persistent memory and optionally credit externally observed outcomes."""
+    track_evidence = (
+        autonomous_evidence
+        and getattr(model.cfg, "event_algebra", False)
+        and len(ids) > 1
+    )
+    before = [state.clone() for state in states] if track_evidence else None
+    logits, states = model.forward_stream(torch.tensor([ids], device=dev), states)
+    if track_evidence:
+        from fractal import feedback
+        credit = feedback.observed_surprise(logits, ids)
+        evidence = feedback.recent_evidence(
+            before, states, len(ids), getattr(model.cfg, "eligibility_decay", 0.95))
+        norm = feedback.apply_to_state(states, evidence, credit, lr=0.05, max_fraction=0.02)
+        model._last_autonomous_credit = {"credit": credit, "update_norm": norm,
+                                         "tokens": len(ids)}
+    return logits, states
 
 
 def _sample(logits, temperature, top_k):
@@ -187,39 +203,51 @@ def _gen_span(model, tok, states, logits, dev, stop_markers, max_new, temperatur
 
 @torch.no_grad()
 def run_turn(model, tok, states, user_text, dev, *, max_new=200, max_tool_calls=6,
-             temperature=0.8, top_k=40, json_guard=False):
+             temperature=0.8, top_k=40, json_guard=False, skill_id=None):
     """One user turn through the emergent loop. Returns (transcript, states). W carries forward."""
     prime = tok.encode(f"\n{cf.USER}\n{user_text}\n{cf.ASSISTANT}\n").ids
-    logits, states = _feed(model, states, prime, dev)
-    transcript, tool_calls = [], 0
+    skill_score = -1.0
+    if skill_id is None and getattr(model, "skill_cortex", None) is not None \
+            and model.skill_cortex.auto_route:
+        route_ids = torch.tensor([prime], device=dev, dtype=torch.long)
+        skill_id, skill_score = model.route_skill_from_ids(route_ids)
+    if skill_id is not None:
+        skill_score = 1.0
+    model._last_skill_route = {"expert_id": skill_id, "score": skill_score}
+    cortex = getattr(model, "skill_cortex", None)
+    skill_context = (
+        (cortex.force(skill_id) if skill_id is not None else cortex.suspend())
+        if cortex is not None else nullcontext()
+    )
+    with skill_context:
+        logits, states = _feed(model, states, prime, dev, autonomous_evidence=True)
+        transcript, tool_calls = [], 0
 
-    while True:
-        span, _, states, logits, hit = _gen_span(
-            model, tok, states, logits, dev, _STOP_MARKERS, max_new, temperature, top_k)
-        if span.strip():
-            transcript.append(("assistant", span.strip()))
+        while True:
+            span, _, states, logits, hit = _gen_span(
+                model, tok, states, logits, dev, _STOP_MARKERS, max_new, temperature, top_k)
+            if span.strip():
+                transcript.append(("assistant", span.strip()))
 
-        if hit != cf.TOOL_CALL:                       # <|end|> / <|user|> / <|system|> / budget → done
-            return transcript, states
+            if hit != cf.TOOL_CALL:                   # role marker / token budget → done
+                return transcript, states
 
-        tool_calls += 1
-        if tool_calls > max_tool_calls:
-            transcript.append(("note", "tool-call budget exceeded"))
-            return transcript, states
+            tool_calls += 1
+            if tool_calls > max_tool_calls:
+                transcript.append(("note", "tool-call budget exceeded"))
+                return transcript, states
 
-        # generate the tool-call JSON payload, then stop at the next marker
-        payload, _, states, logits, _ = _gen_span(
-            model, tok, states, logits, dev,
-            (cf.TOOL_RESULT, cf.ASSISTANT, cf.END, cf.USER), max_new=128,
-            temperature=temperature, top_k=top_k)
-        name, args = parse_tool_call(payload, json_guard)
-        result = execute_tool(name, args) if name else args   # args holds the error string when name is None
-        transcript.append(("tool_call", {"name": name, "arguments": args if name else {}}))
-        transcript.append(("tool_result", result))
+            payload, _, states, logits, _ = _gen_span(
+                model, tok, states, logits, dev,
+                (cf.TOOL_RESULT, cf.ASSISTANT, cf.END, cf.USER), max_new=128,
+                temperature=temperature, top_k=top_k)
+            name, args = parse_tool_call(payload, json_guard)
+            result = execute_tool(name, args) if name else args
+            transcript.append(("tool_call", {"name": name, "arguments": args if name else {}}))
+            transcript.append(("tool_result", result))
 
-        # stream the result back through the model and reopen the assistant → W absorbs it
-        back = tok.encode(f"\n{cf.TOOL_RESULT}\n{result}\n{cf.ASSISTANT}\n").ids
-        logits, states = _feed(model, states, back, dev)
+            back = tok.encode(f"\n{cf.TOOL_RESULT}\n{result}\n{cf.ASSISTANT}\n").ids
+            logits, states = _feed(model, states, back, dev, autonomous_evidence=True)
 
 
 def _print_turn(transcript):
